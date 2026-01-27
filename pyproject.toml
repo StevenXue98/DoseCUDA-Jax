@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core", "numpy < 2"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "DoseCUDA"
+version = "1.0"
+description = "GPU-based radiation dose calculation using CUDA."
+readme = "README.md"
+
+authors = [
+    {name = "Tom Hrinivich", email = "DoseCUDA@gmail.com"},
+    {name = "Calin Reamy", email = "DoseCUDA@gmail.com"},
+    {name = "Mahasweta Bhattacharya", email = "DoseCUDA@gmail.com"}
+]
+
+dependencies = [
+    "numpy < 2",
+    "pydicom",
+    "SimpleITK",
+    "pandas"
+]
+
+keywords = ["radiation", "oncology", "medical", "proton", "cuda"]
+
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Physics"
+]
+
+[tool.setuptools]
+packages = ["DoseCUDA"]
