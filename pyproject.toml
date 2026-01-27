@@ -18,7 +18,15 @@ dependencies = [
     "numpy < 2",
     "pydicom",
     "SimpleITK",
-    "pandas"
+    "pandas",
+    "pydicom", 
+    "SimpleITK",
+    "scikit-build-core",
+    "cmake",
+    "ninja", 
+    "pynrrd",
+    "matplotlib",
+    "jax[cuda12]"
 ]
 
 keywords = ["radiation", "oncology", "medical", "proton", "cuda"]
