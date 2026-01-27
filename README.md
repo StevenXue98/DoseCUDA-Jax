@@ -150,3 +150,36 @@ For any questions or support regarding DoseCUDA, please reach out via email:
 
 # Funding Support
 * The Commonwealth Fund
+
+# JAX Implementation
+
+Differentiable implementation of the PB algorithm in Jax.
+
+## Main Changes
+
+1. **JAX Algorithm Implementation**
+   - New DoseCUDA/Jax folder containing the JAX-based pencil beam algorithm
+   - Core implementation in:
+     - cuda_classes_jax.py
+     - impt_classes_jax.py
+     - jax_impt.py
+
+2. **Test Cases for Jax**
+   - added test scripts for Jax in the folder tests:
+     - JAX implementation tests
+     - Numerical comparison between CUDA and JAX implementations
+     - Jupyter notebook for dose visualization
+   - Usage is similar to the original tests:
+      ```cmd
+      python tests\test_phantom_impt_jax.py
+      ```
+      or 
+      ```cmd
+      python tests\tcompare_cuda_jax.py
+      ```
+
+3. **Updated Dependencies**
+   - added new package dependencies in pyproject.toml, with main addition being jax[cuda12]
+
+4. **CUDA Architecture Configuration**
+   - Changed line 6 of CMakeLists.txt from `set(CMAKE_CUDA_ARCHITECTURES native)` to `CMAKE_CUDA_ARCHITECTURES 86` in order to successfully run on Lambda Cloud. 
