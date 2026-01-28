@@ -180,6 +180,10 @@ Differentiable implementation of the PB algorithm in Jax.
 
 3. **Updated Dependencies**
    - added new package dependencies in pyproject.toml, with main addition being jax[cuda12]
+   - Package can still be installed with original command with new Jax implementations:
+      ```
+      python -m pip install .
+      ```
 
 4. **CUDA Architecture Configuration**
    - Changed line 6 of CMakeLists.txt from `set(CMAKE_CUDA_ARCHITECTURES native)` to `CMAKE_CUDA_ARCHITECTURES 86` in order to successfully run on Lambda Cloud. 
