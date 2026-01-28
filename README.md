@@ -175,7 +175,7 @@ Differentiable implementation of the PB algorithm in Jax.
       ```
       or 
       ```cmd
-      python tests\tcompare_cuda_jax.py
+      python tests\compare_cuda_jax_dose.py
       ```
 
 3. **Updated Dependencies**
