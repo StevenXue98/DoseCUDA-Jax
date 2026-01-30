@@ -1,10 +1,10 @@
 """
-impt_jax_pure.py - Pure functional JAX implementation of IMPT dose calculation.
+impt_jax.py - Pure functional JAX implementation of IMPT dose calculation.
 
 Usage:
-    from DoseCUDA.Jax.impt_jax_pure import computeIMPTPlanJaxPure
+    from DoseCUDA.Jax.impt_jax import computeIMPTPlanJax
     
-    dose_jax = computeIMPTPlanJaxPure(dose_grid, plan)
+    dose_jax = computeIMPTPlanJax(dose_grid, plan)
 """
 
 import os
@@ -258,9 +258,12 @@ def _raytrace_kernel_optimized(ni: int, nj: int, nk: int,
         ray_y = vox_xyz_y + uvec_y * ray_length
         ray_z = vox_xyz_z + uvec_z * ray_length
         
-        tex_x = (ray_x + iso_x) / spacing + 0.5
-        tex_y = (ray_y + iso_y) / spacing + 0.5
-        tex_z = (ray_z + iso_z) / spacing + 0.5
+        # Convert ray position to array index coordinates for map_coordinates
+        # Note: scipy/JAX map_coordinates uses (i, j, k) directly for voxel [i][j][k]
+        # (No +0.5 offset needed, unlike CUDA 3D textures which use a half-texel offset)
+        tex_x = (ray_x + iso_x) / spacing
+        tex_y = (ray_y + iso_y) / spacing
+        tex_z = (ray_z + iso_z) / spacing
         
         within_bounds = (tex_x >= 0) & (tex_x < ni) & \
                        (tex_y >= 0) & (tex_y < nj) & \
@@ -278,7 +281,141 @@ def _raytrace_kernel_optimized(ni: int, nj: int, nk: int,
     wet_array = lax.fori_loop(0, max_steps, ray_step, wet_sum)
     # Keep in (ni, nj, nk) = (x, y, z) order for internal consistency
     
-    return wet_array.flatten()
+    return wet_array
+
+
+# =============================================================================
+# WET smoothing kernel (lateral averaging for scattering correction)
+# =============================================================================
+
+def _point_head_to_image(head_x, head_y, head_z, singa, cosga, sinta, costa):
+    """
+    Transform from head coordinates back to image coordinates.
+    Inverse of pointXYZImageToHead.
+    """
+    # Convert from DICOM nozzle coords back to patient coords
+    # head->x = -xg, head->y = zg, head->z = yg
+    # So: xz = -head_x, yz = head_z, zz = head_y
+    xz = -head_x
+    yz = head_z
+    zz = head_y
+    
+    # Inverse gantry rotation (rotate about z-axis, positive direction)
+    # Note: CUDA uses singa (not -singa) for inverse
+    xg = xz * cosga - yz * singa
+    yg = xz * singa + yz * cosga
+    zg = zz
+    
+    # Inverse table rotation (rotate about y-axis, positive direction)
+    xt = xg * costa + zg * sinta
+    yt = yg
+    zt = -xg * sinta + zg * costa
+    
+    return xt, yt, zt
+
+
+@partial(jax.jit, static_argnums=(0, 1, 2))
+def _smooth_wet_kernel(ni: int, nj: int, nk: int,
+                       spacing: jnp.ndarray,
+                       wet_array: jnp.ndarray,
+                       vox_head_x: jnp.ndarray,
+                       vox_head_y: jnp.ndarray,
+                       vox_head_z: jnp.ndarray,
+                       singa: jnp.ndarray, cosga: jnp.ndarray,
+                       sinta: jnp.ndarray, costa: jnp.ndarray,
+                       iso_x: jnp.ndarray, iso_y: jnp.ndarray, iso_z: jnp.ndarray) -> jnp.ndarray:
+    """
+    Smooth WET array by lateral averaging perpendicular to beam direction.
+    
+    Samples 6 directions at 60° intervals, walking outward up to 
+    min(10mm, center_wet*10) in each direction.
+    """
+    # wet_array is (ni, nj, nk) = (x, y, z) order
+    
+    # Max distance to sample: min(center_wet * 10, 10) mm
+    max_dr = jnp.minimum(wet_array * 10.0, 10.0)
+    
+    # Pre-compute all direction vectors (6 directions at 60 degree intervals)
+    # and all distances (1-10 mm)
+    n_directions = 6
+    n_distances = 10
+    
+    # Create arrays of angles and distances
+    angles = jnp.arange(n_directions) * (jnp.pi / 3.0)  # 0, 60, 120, 180, 240, 300 degrees
+    distances = jnp.arange(1, n_distances + 1, dtype=jnp.float32)  # 1, 2, ..., 10 mm
+    
+    # Create meshgrid of all angle/distance combinations: (n_directions, n_distances)
+    angle_grid, dist_grid = jnp.meshgrid(angles, distances, indexing='ij')
+    # Flatten to (n_directions * n_distances,)
+    all_angles = angle_grid.flatten()
+    all_dists = dist_grid.flatten()
+    n_samples = len(all_angles)
+    
+    # Direction components in head x-y plane
+    cos_angles = jnp.cos(all_angles)  # (n_samples,)
+    sin_angles = jnp.sin(all_angles)  # (n_samples,)
+    
+    # Initialize sums with center values
+    wet_sum = wet_array.copy()
+    n_voxels = jnp.ones_like(wet_array)
+    
+    # Process all sample points using vmap for efficiency
+    # For each sample offset, compute contribution to all voxels
+    def process_sample(carry, sample_idx):
+        wet_sum, n_voxels = carry
+        
+        dr = all_dists[sample_idx]
+        cos_a = cos_angles[sample_idx]
+        sin_a = sin_angles[sample_idx]
+        
+        # Offset in head coordinates (in x-y plane perpendicular to beam)
+        offset_head_x = dr * cos_a
+        offset_head_y = dr * sin_a
+        
+        # New head position
+        new_head_x = vox_head_x + offset_head_x
+        new_head_y = vox_head_y + offset_head_y
+        new_head_z = vox_head_z  # unchanged
+        
+        # Transform back to image coordinates
+        new_img_x, new_img_y, new_img_z = _point_head_to_image(
+            new_head_x, new_head_y, new_head_z,
+            singa, cosga, sinta, costa
+        )
+        
+        # Convert to voxel indices: ijk = (xyz + iso) / spacing
+        new_i = jnp.round((new_img_x + iso_x) / spacing).astype(jnp.int32)
+        new_j = jnp.round((new_img_y + iso_y) / spacing).astype(jnp.int32)
+        new_k = jnp.round((new_img_z + iso_z) / spacing).astype(jnp.int32)
+        
+        # Check bounds
+        within_bounds = (new_i >= 0) & (new_i < ni) & \
+                       (new_j >= 0) & (new_j < nj) & \
+                       (new_k >= 0) & (new_k < nk)
+        
+        # Check distance is within max for this voxel
+        within_range = dr < max_dr
+        valid = within_bounds & within_range
+        
+        # Clip for safe indexing
+        safe_i = jnp.clip(new_i, 0, ni - 1)
+        safe_j = jnp.clip(new_j, 0, nj - 1)
+        safe_k = jnp.clip(new_k, 0, nk - 1)
+        
+        # Sample neighbor WET
+        neighbor_wet = wet_array[safe_i, safe_j, safe_k]
+        
+        # Accumulate where valid
+        wet_sum = wet_sum + jnp.where(valid, neighbor_wet, 0.0)
+        n_voxels = n_voxels + jnp.where(valid, 1.0, 0.0)
+        
+        return (wet_sum, n_voxels), None
+    
+    # Use lax.scan to iterate over all samples (compiles to a single loop)
+    (wet_sum, n_voxels), _ = lax.scan(process_sample, (wet_sum, n_voxels), jnp.arange(n_samples))
+    
+    # Return average
+    return wet_sum / n_voxels
 
 
 # =============================================================================
@@ -304,9 +441,8 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
     Optimized pencil beam kernel - processes spots sequentially using lax.fori_loop
     to reduce memory usage from O(ni*nj*nk*n_spots) to O(ni*nj*nk).
     """
-    # Reshape wet_array to 3D and convert to mm
-    wet_3d = wet_array.reshape(ni, nj, nk)
-    wet = wet_3d * 10.0
+    # wet_array is already 3D (ni, nj, nk), convert to mm
+    wet = wet_array * 10.0
     
     # Check R80 limit
     r80_limit = 1.1 * r80
@@ -401,9 +537,8 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
     dose_array = jnp.where(valid_mask, total_dose, 0.0)
     
     # Transpose from (ni, nj, nk) = (x, y, z) to (nk, nj, ni) = (z, y, x) order
-    dose_array = dose_array.transpose(2, 1, 0)
-    
-    return dose_array.flatten()
+    # This matches the output format expected by SimpleITK/NRRD
+    return dose_array.transpose(2, 1, 0)
 
 
 # =============================================================================
@@ -414,21 +549,21 @@ def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
                           density_array: jnp.ndarray,
                           grids: PrecomputedGrids) -> jnp.ndarray:
     """
-    Compute WET using ray tracing - pure functional interface.
+    Compute WET using ray tracing with lateral smoothing - pure functional interface.
     
     Args:
         beam_params: Beam geometry parameters
         dose_params: Dose grid parameters  
-        density_array: Density array (flat)
+        density_array: Density array (3D, shape ni x nj x nk)
         grids: Precomputed voxel grids
         
     Returns:
-        WET array (flat)
+        Smoothed WET array (3D, shape ni x nj x nk)
     """
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
     
-    # Reshape density to 3D
-    density_3d = density_array.reshape(ni, nj, nk)
+    # density_array is already 3D
+    density_3d = density_array
     
     # Calculate max steps (ensure we use Python floats to avoid JAX array)
     spacing_val = float(dose_params.spacing)
@@ -439,8 +574,8 @@ def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
     )) + 500.0
     max_steps = int(max_dist) + 10
     
-    # Use optimized kernel with precomputed grids
-    return _raytrace_kernel_optimized(
+    # Step 1: Ray trace to get raw WET
+    raw_wet = _raytrace_kernel_optimized(
         ni, nj, nk,
         dose_params.spacing,
         beam_params.iso_x, beam_params.iso_y, beam_params.iso_z,
@@ -449,6 +584,19 @@ def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
         grids.vox_xyz_x, grids.vox_xyz_y, grids.vox_xyz_z,
         grids.uvec_x, grids.uvec_y, grids.uvec_z
     )
+    
+    # Step 2: Apply lateral smoothing (accounts for proton scattering)
+    smoothed_wet = _smooth_wet_kernel(
+        ni, nj, nk,
+        dose_params.spacing,
+        raw_wet,
+        grids.vox_head_x, grids.vox_head_y, grids.vox_head_z,
+        beam_params.singa, beam_params.cosga,
+        beam_params.sinta, beam_params.costa,
+        beam_params.iso_x, beam_params.iso_y, beam_params.iso_z
+    )
+    
+    return smoothed_wet
 
 
 def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
@@ -467,15 +615,14 @@ def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
         lut_data: Lookup table data
         spot_data: Spot position and weight data
         layer_data: Energy layer data
-        wet_array: Water equivalent thickness array (flat)
+        wet_array: Water equivalent thickness array (3D, shape ni x nj x nk)
         grids: Optional precomputed grids (if None, will be computed)
         
     Returns:
-        Dose array (flat)
+        Dose array (3D, shape nk x nj x ni in z,y,x order for NRRD)
     """
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
     n_layers = layer_data.n_layers
-    num_voxels = ni * nj * nk
     
     # Pre-compute voxel grids if not provided
     if grids is None:
@@ -488,8 +635,8 @@ def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
             beam_params.sinta, beam_params.costa
         )
     
-    # Initialize dose accumulator
-    dose_array = jnp.zeros(num_voxels, dtype=jnp.float32)
+    # Initialize dose accumulator (in output z,y,x order)
+    dose_array = jnp.zeros((nk, nj, ni), dtype=jnp.float32)
     
     # Process each layer with Python loop
     for layer_id in range(n_layers):
@@ -551,13 +698,13 @@ def compute_impt_dose_optimized(beam_params: BeamParams, dose_params: DoseParams
     Args:
         beam_params: Beam geometry parameters
         dose_params: Dose grid parameters
-        density_array: Density array (flat, ni*nj*nk elements)
+        density_array: Density array (3D, shape ni x nj x nk)
         lut_data: Lookup table data
         spot_data: Spot position and weight data
         layer_data: Energy layer data
         
     Returns:
-        Dose array (flat, in (z,y,x) order matching dose_grid.size)
+        Dose array (3D, shape nk x nj x ni in z,y,x order for NRRD)
     """
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
     
@@ -716,12 +863,12 @@ def _extract_layer_data(spot_data: SpotData, beam_model) -> LayerData:
 # Main entry point (compatible with class-based jax_impt.py API)
 # =============================================================================
 
-def computeIMPTPlanJaxPure(dose_grid, plan):
+def computeIMPTPlanJax(dose_grid, plan):
     """
     Compute IMPT dose using pure functional JAX implementation.
     
-    This is a drop-in replacement for computeIMPTPlanJax that uses
-    pure functions internally for better JIT efficiency.
+    This is a drop-in replacement for the CUDA implementation that uses
+    pure JAX functions internally for better JIT efficiency.
     
     Args:
         dose_grid: IMPTDoseGrid object with CT/phantom data
@@ -734,9 +881,9 @@ def computeIMPTPlanJaxPure(dose_grid, plan):
     if dose_grid.spacing[0] != dose_grid.spacing[1] or dose_grid.spacing[0] != dose_grid.spacing[2]:
         raise ValueError("Spacing must be isotropic for IMPT dose calculation")
     
-    # Get RLSP from HU
+    # Get RLSP from HU - keep as 3D array
     rlsp = dose_grid.RLSPFromHU(plan.machine_name)
-    density_array = jnp.array(rlsp.flatten(), dtype=jnp.float32)
+    density_array = jnp.array(rlsp, dtype=jnp.float32)
     
     # Create dose parameters
     dose_params = DoseParams(
@@ -746,8 +893,9 @@ def computeIMPTPlanJaxPure(dose_grid, plan):
         spacing=jnp.array(float(dose_grid.spacing[0]), dtype=jnp.float32)
     )
     
-    # Accumulate dose from all beams
-    total_dose = np.zeros(dose_grid.size, dtype=np.float32)
+    # Output shape is (nk, nj, ni) = (z, y, x) for NRRD compatibility
+    output_shape = (dose_params.nk, dose_params.nj, dose_params.ni)
+    total_dose = np.zeros(output_shape, dtype=np.float32)
     
     for beam in plan.beam_list:
         # Get beam model
@@ -767,12 +915,13 @@ def computeIMPTPlanJaxPure(dose_grid, plan):
         layer_data = _extract_layer_data(spot_data, beam_model)
         
         # Use optimized API that precomputes grids once for raytrace + dose
+        # Returns 3D array in (z, y, x) order
         dose_array = compute_impt_dose_optimized(
             beam_params, dose_params, density_array, lut_data, spot_data, layer_data
         )
         
-        # Accumulate
-        total_dose += np.array(dose_array).reshape(dose_grid.size)
+        # Accumulate (both are now 3D arrays in same order)
+        total_dose += np.array(dose_array)
     
     # Apply fractions
     total_dose *= plan.n_fractions
