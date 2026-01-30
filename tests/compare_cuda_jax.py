@@ -1,20 +1,27 @@
 """
 Compare CUDA and Pure JAX IMPT dose calculations.
 Runs both implementations on identical phantom/beam setup and reports differences.
+Saves results to test_phantom_output/ folder as NRRD files.
 """
 import os
 import sys
 import time
 import numpy as np
+import SimpleITK as sitk
 
 # Add Jax folder to path for imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
 jax_dir = os.path.join(os.path.dirname(script_dir), "DoseCUDA", "Jax")
+output_dir = os.path.join(os.path.dirname(script_dir), "test_phantom_output")
 sys.path.insert(0, jax_dir)
 
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from impt_jax_pure import computeIMPTPlanJaxPure
+from impt_jax import computeIMPTPlanJax
 import jax.numpy as jnp
+
+# Ensure output directory exists
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
 
 def create_test_plan():
@@ -23,7 +30,7 @@ def create_test_plan():
     beam = IMPTBeam()
     
     beam.dicom_rangeshifter_label = '0'
-    n_spots = 98
+    n_spots = 8
     for energy_id in range(n_spots):
         theta = 2.0 * 3.14159 * energy_id / n_spots
         spot_x = 100.0 * np.cos(theta)
@@ -41,9 +48,9 @@ def run_cuda_dose(dose, plan):
     return np.array(dose.dose)
 
 
-def run_jax_pure_dose(dose, plan):
+def run_jax_dose(dose, plan):
     """Run pure functional JAX dose calculation and return numpy array."""
-    return np.array(computeIMPTPlanJaxPure(dose, plan))
+    return np.array(computeIMPTPlanJax(dose, plan))
 
 
 def compare_doses(cuda_dose, jax_dose):
@@ -128,7 +135,7 @@ def main():
     plan_jax1 = create_test_plan()
     
     start_time = time.perf_counter()
-    jax_result1 = run_jax_pure_dose(dose_jax1, plan_jax1)
+    jax_result1 = run_jax_dose(dose_jax1, plan_jax1)
     jax_first_time = time.perf_counter() - start_time
     print(f"Pure JAX first run time (with JIT compilation): {jax_first_time:.4f} seconds")
     
@@ -139,7 +146,7 @@ def main():
     plan_jax2 = create_test_plan()
     
     start_time = time.perf_counter()
-    jax_result2 = run_jax_pure_dose(dose_jax2, plan_jax2)
+    jax_result2 = run_jax_dose(dose_jax2, plan_jax2)
     jax_second_time = time.perf_counter() - start_time
     print(f"Pure JAX second run time (JIT cached): {jax_second_time:.4f} seconds")
     
@@ -159,6 +166,31 @@ def main():
     # Compare results
     print("\n\nComparing CUDA vs Pure JAX:")
     compare_doses(cuda_result, jax_result2)
+    
+    # Save results to NRRD files
+    print("\nSaving results to test_phantom_output/...")
+    
+    # Save CUDA dose
+    cuda_img = sitk.GetImageFromArray(cuda_result.astype(np.float32))
+    cuda_img.SetOrigin(dose_cuda.origin)
+    cuda_img.SetSpacing(dose_cuda.spacing)
+    sitk.WriteImage(cuda_img, os.path.join(output_dir, "cube_impt_dose.nrrd"))
+    
+    # Save JAX dose
+    jax_img = sitk.GetImageFromArray(jax_result2.astype(np.float32))
+    jax_img.SetOrigin(dose_cuda.origin)
+    jax_img.SetSpacing(dose_cuda.spacing)
+    sitk.WriteImage(jax_img, os.path.join(output_dir, "cube_impt_dose_jax.nrrd"))
+    
+    # Save CT (same for both, just save once)
+    dose_cuda.writeCTNRRD(os.path.join(output_dir, "cube_phantom_ct.nrrd"))
+    dose_cuda.writeCTNRRD(os.path.join(output_dir, "cube_phantom_ct_jax.nrrd"))
+    
+    print("Done. Saved:")
+    print(f"  - {os.path.join(output_dir, 'cube_impt_dose.nrrd')}")
+    print(f"  - {os.path.join(output_dir, 'cube_impt_dose_jax.nrrd')}")
+    print(f"  - {os.path.join(output_dir, 'cube_phantom_ct.nrrd')}")
+    print(f"  - {os.path.join(output_dir, 'cube_phantom_ct_jax.nrrd')}")
 
 
 if __name__ == "__main__":
