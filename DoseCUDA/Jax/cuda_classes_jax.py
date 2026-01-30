@@ -12,6 +12,61 @@ from typing import Tuple, Optional
 import numpy as np
 
 
+# =============================================================================
+# JIT-compiled utility functions
+# =============================================================================
+
+@jax.jit
+def lower_bound_jax(data: jnp.ndarray, key: jnp.ndarray) -> jnp.ndarray:
+    """
+    Differentiable binary search for lower bound
+    
+    Finds the first index i such that data[i] >= key
+    
+    Args:
+        data: Sorted 1D array
+        key: Search key
+        
+    Returns:
+        Index of lower bound
+    """
+    return jnp.searchsorted(data, key, side='left')
+
+
+@jax.jit
+def sqr_jax(x: jnp.ndarray) -> jnp.ndarray:
+    """Square of input"""
+    return x * x
+
+
+@jax.jit
+def clamp_jax(x: jnp.ndarray, lo: jnp.ndarray, hi: jnp.ndarray) -> jnp.ndarray:
+    """Clamp value to [lo, hi]"""
+    return jnp.clip(x, lo, hi)
+
+
+@jax.jit
+def xyz_dotproduct_jax(a_x: jnp.ndarray, a_y: jnp.ndarray, a_z: jnp.ndarray,
+                       b_x: jnp.ndarray, b_y: jnp.ndarray, b_z: jnp.ndarray) -> jnp.ndarray:
+    """3D dot product using separate components for JIT compatibility"""
+    return a_x * b_x + a_y * b_y + a_z * b_z
+
+
+@jax.jit
+def xyz_crossproduct_jax(a_x: jnp.ndarray, a_y: jnp.ndarray, a_z: jnp.ndarray,
+                         b_x: jnp.ndarray, b_y: jnp.ndarray, b_z: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """3D cross product using separate components for JIT compatibility"""
+    return (
+        a_y * b_z - a_z * b_y,
+        a_z * b_x - a_x * b_z,
+        a_x * b_y - a_y * b_x
+    )
+
+
+# =============================================================================
+# Data structures
+# =============================================================================
+
 @dataclass
 class PointXYZ_jax:
     """3D Cartesian coordinates"""
@@ -344,45 +399,3 @@ class CudaDose_jax:
         return (point_xyz.x >= 0.0) & (point_xyz.x < jnp.asarray(self.img_sz.i, dtype=jnp.float32)) & \
                (point_xyz.y >= 0.0) & (point_xyz.y < jnp.asarray(self.img_sz.j, dtype=jnp.float32)) & \
                (point_xyz.z >= 0.0) & (point_xyz.z < jnp.asarray(self.img_sz.k, dtype=jnp.float32))
-
-
-# Utility functions that are differentiable
-def lower_bound_jax(data: jnp.ndarray, key: jnp.ndarray) -> jnp.ndarray:
-    """
-    Differentiable binary search for lower bound
-    
-    Finds the first index i such that data[i] >= key
-    
-    Args:
-        data: Sorted 1D array
-        key: Search key
-        
-    Returns:
-        Index of lower bound
-    """
-    # Using searchsorted for differentiable binary search
-    return jnp.searchsorted(data, key, side='left')
-
-
-def sqr_jax(x: jnp.ndarray) -> jnp.ndarray:
-    """Square of input"""
-    return x * x
-
-
-def clamp_jax(x: jnp.ndarray, lo: jnp.ndarray, hi: jnp.ndarray) -> jnp.ndarray:
-    """Clamp value to [lo, hi]"""
-    return jnp.clip(x, lo, hi)
-
-
-def xyz_dotproduct_jax(a: PointXYZ_jax, b: PointXYZ_jax) -> jnp.ndarray:
-    """3D dot product"""
-    return a.x * b.x + a.y * b.y + a.z * b.z
-
-
-def xyz_crossproduct_jax(a: PointXYZ_jax, b: PointXYZ_jax) -> PointXYZ_jax:
-    """3D cross product"""
-    return PointXYZ_jax(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x
-    )

@@ -9,7 +9,7 @@ jax_dir = os.path.join(os.path.dirname(script_dir), "DoseCUDA", "Jax")
 sys.path.insert(0, jax_dir)
 
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from jax_impt import computeIMPTPlanJax
+from impt_jax_pure import computeIMPTPlanJaxPure
 
 # check if test_phantom_output directory exists
 if not os.path.exists("test_phantom_output"):
@@ -36,11 +36,11 @@ for energy_id in range(n_spots):
 # add the beam to the plan
 plan.addBeam(beam)
 
-# compute the dose using JAX
-dose_jax = computeIMPTPlanJax(dose, plan)
+# compute the dose using Pure JAX
+dose_jax_pure = computeIMPTPlanJaxPure(dose, plan)
 
-# write the JAX dose to a file
-dose_img = sitk.GetImageFromArray(dose_jax.astype(np.float32))
+# write the Pure JAX dose to a file
+dose_img = sitk.GetImageFromArray(dose_jax_pure.astype(np.float32))
 dose_img.SetOrigin(dose.origin)
 dose_img.SetSpacing(dose.spacing)
 sitk.WriteImage(dose_img, "test_phantom_output/cube_impt_dose_jax.nrrd")
