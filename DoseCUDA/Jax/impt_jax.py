@@ -606,9 +606,6 @@ def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
     """
     Compute proton dose using optimized kernel that reduces memory usage.
     
-    This version uses _pencil_beam_single_layer which processes spots sequentially
-    using lax.fori_loop, reducing memory from O(ni*nj*nk*n_spots) to O(ni*nj*nk).
-    
     Args:
         beam_params: Beam geometry parameters
         dose_params: Dose grid parameters
