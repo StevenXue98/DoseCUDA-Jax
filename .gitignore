@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Large output files
+*.npy
+*.nrrd
+test_phantom_output/optimization/

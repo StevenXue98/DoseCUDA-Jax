@@ -26,7 +26,8 @@ dependencies = [
     "ninja", 
     "pynrrd",
     "matplotlib",
-    "jax[cuda12]"
+    "jax[cuda12]",
+    "optax"
 ]
 
 keywords = ["radiation", "oncology", "medical", "proton", "cuda"]

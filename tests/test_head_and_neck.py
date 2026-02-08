@@ -24,8 +24,11 @@ import SimpleITK as sitk
 # Add project root to path for utils module (but after site-packages so DoseCUDA uses installed version)
 sys.path.append('/home/ubuntu/DoseCUDA-Jax')
 
+# Add Jax folder to path for impt_jax_fix
+sys.path.insert(0, '/home/ubuntu/DoseCUDA-Jax/DoseCUDA/Jax')
+
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from DoseCUDA.Jax.impt_jax import computeIMPTPlanJax
+from impt_jax_fix import computeIMPTPlanJax
 from utils.matrad_converter import MatRadData, convert_to_dosecuda
 
 
@@ -254,14 +257,48 @@ def test_head_and_neck():
     jax_max = jax_dose.max()
     vprint(f"  JAX max: {jax_max:.4f} Gy")
     
-    # For HEAD_AND_NECK, just check that both produce reasonable dose
-    # and max doses are within 20% (axis ordering issues prevent exact comparison)
+    # Detailed comparison (same as compare.py)
+    passed, max_rel_diff, pass_rate = compare_doses(cuda_dose, jax_dose)
+    
+    # Also compute correlation and tolerance metrics
+    diff = cuda_dose - jax_dose
+    abs_diff = np.abs(diff)
+    
+    # Correlation
+    if cuda_dose.std() > 0 and jax_dose.std() > 0:
+        corr = np.corrcoef(cuda_dose.flatten(), jax_dose.flatten())[0, 1]
+        vprint(f"  Pearson correlation: {corr:.8f}")
+    
+    # Voxel-level agreement
+    tol_1pct = np.sum(abs_diff <= 0.01 * cuda_max) / cuda_dose.size * 100
+    tol_5pct = np.sum(abs_diff <= 0.05 * cuda_max) / cuda_dose.size * 100
+    vprint(f"  Voxels within 1% of max: {tol_1pct:.2f}%")
+    vprint(f"  Voxels within 5% of max: {tol_5pct:.2f}%")
+    
+    # Save dose results as NRRD for visualization
+    vprint(f"\n  Saving dose results to {output_dir}...")
+    
+    # Save CUDA dose
+    cuda_dose_img = sitk.GetImageFromArray(np.transpose(cuda_dose, (2, 1, 0)))  # (x,y,z) -> (z,y,x) for NRRD
+    cuda_dose_img.SetOrigin(dose.origin.tolist())
+    cuda_dose_img.SetSpacing(dose.spacing.tolist())
+    sitk.WriteImage(cuda_dose_img, os.path.join(output_dir, 'dose_cuda.nrrd'))
+    
+    # Save JAX dose
+    jax_dose_img = sitk.GetImageFromArray(np.transpose(jax_dose, (2, 1, 0)))
+    jax_dose_img.SetOrigin(dose.origin.tolist())
+    jax_dose_img.SetSpacing(dose.spacing.tolist())
+    sitk.WriteImage(jax_dose_img, os.path.join(output_dir, 'dose_jax.nrrd'))
+    
+    vprint(f"  Saved: dose_cuda.nrrd, dose_jax.nrrd")
+    
+    # For HEAD_AND_NECK, pass if >99% within 1% tolerance
     max_ratio = max(cuda_max, jax_max) / max(min(cuda_max, jax_max), 1e-8)
-    reasonable = (cuda_max > 0.1) and (jax_max > 0.1) and (max_ratio < 1.5)
+    reasonable = tol_1pct >= 99.0
     
     vprint(f"\n  Max dose ratio: {max_ratio:.2f}")
     
-    return reasonable, max_ratio
+    return reasonable, tol_1pct
 
 
 def main():
@@ -287,11 +324,11 @@ def main():
         all_passed = False
     
     # Test 2: HEAD_AND_NECK (sanity check)
-    passed2, ratio2 = test_head_and_neck()
+    passed2, tol_1pct = test_head_and_neck()
     if passed2:
-        print(f"PASS: HEAD_AND_NECK sanity check (max dose ratio: {ratio2:.2f})")
+        print(f"PASS: HEAD_AND_NECK test ({tol_1pct:.2f}% within 1% tolerance)")
     else:
-        print(f"FAIL: HEAD_AND_NECK sanity check (max dose ratio: {ratio2:.2f})")
+        print(f"FAIL: HEAD_AND_NECK test ({tol_1pct:.2f}% within 1% tolerance)")
         all_passed = False
     
     vprint("\n=== Done ===")
