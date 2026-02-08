@@ -233,7 +233,7 @@ def _precompute_all_grids(ni: int, nj: int, nk: int,
 # =============================================================================
 
 @partial(jax.jit, static_argnums=(0, 1, 2, 7))
-def _raytrace_kernel_optimized(ni: int, nj: int, nk: int,
+def _raytrace_kernel(ni: int, nj: int, nk: int,
                                 spacing: jnp.ndarray,
                                 iso_x: jnp.ndarray, iso_y: jnp.ndarray, iso_z: jnp.ndarray,
                                 max_steps: int,
@@ -545,7 +545,7 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
 # High-level computation functions
 # =============================================================================
 
-def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
+def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
                           density_array: jnp.ndarray,
                           grids: PrecomputedGrids) -> jnp.ndarray:
     """
@@ -575,7 +575,7 @@ def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
     max_steps = int(max_dist) + 10
     
     # Step 1: Ray trace to get raw WET
-    raw_wet = _raytrace_kernel_optimized(
+    raw_wet = _raytrace_kernel(
         ni, nj, nk,
         dose_params.spacing,
         beam_params.iso_x, beam_params.iso_y, beam_params.iso_z,
@@ -599,7 +599,7 @@ def compute_raytrace_pure(beam_params: BeamParams, dose_params: DoseParams,
     return smoothed_wet
 
 
-def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
+def compute_dose(beam_params: BeamParams, dose_params: DoseParams,
                       lut_data: LUTData, spot_data: SpotData, layer_data: LayerData,
                       wet_array: jnp.ndarray,
                       grids: PrecomputedGrids = None) -> jnp.ndarray:
@@ -679,7 +679,7 @@ def compute_dose_pure(beam_params: BeamParams, dose_params: DoseParams,
     return dose_array
 
 
-def compute_impt_dose_optimized(beam_params: BeamParams, dose_params: DoseParams,
+def compute_impt_dose(beam_params: BeamParams, dose_params: DoseParams,
                                  density_array: jnp.ndarray, lut_data: LUTData,
                                  spot_data: SpotData, layer_data: LayerData) -> jnp.ndarray:
     """
@@ -716,10 +716,10 @@ def compute_impt_dose_optimized(beam_params: BeamParams, dose_params: DoseParams
     )
     
     # Compute WET using precomputed grids
-    wet_array = compute_raytrace_pure(beam_params, dose_params, density_array, grids)
+    wet_array = compute_raytrace(beam_params, dose_params, density_array, grids)
     
     # Compute dose using memory-optimized kernel
-    dose_array = compute_dose_pure(
+    dose_array = compute_dose(
         beam_params, dose_params, lut_data, spot_data, layer_data, wet_array, grids
     )
     
@@ -913,7 +913,7 @@ def computeIMPTPlanJax(dose_grid, plan):
         
         # Use optimized API that precomputes grids once for raytrace + dose
         # Returns 3D array in (z, y, x) order
-        dose_array = compute_impt_dose_optimized(
+        dose_array = compute_impt_dose(
             beam_params, dose_params, density_array, lut_data, spot_data, layer_data
         )
         
