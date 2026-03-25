@@ -1,8 +1,29 @@
 # Python cache
 __pycache__/
 *.pyc
+*.py[cod]
+*.pyo
 
 # Large output files
 *.npy
 *.nrrd
 test_phantom_output/optimization/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+dosecuda-env/
+*.env
+*.venv
+env/
+venv/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
