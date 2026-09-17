@@ -12,6 +12,37 @@ Bhattacharya M, Reamy C, Li H, Lee J, Hrinivich WT. A Python package for fast GP
 
 # Quickstart Guide
 
+## Native Ubuntu environment for the GTX 1080 Ti
+
+This repository includes a project-local Spack environment for CUDA 12.9 and
+compute capability 6.1. It reuses the host CUDA installation at
+`/usr/local/cuda-12.9`; Spack does not install or modify the NVIDIA driver.
+
+Create the toolchain and Python environment from the repository root:
+
+```bash
+source "$HOME/.spack-src/share/spack/setup-env.sh"
+spack -e . concretize
+spack -e . install
+./.spack-env/view/bin/python -m venv .venv
+.venv/bin/python -m pip install --upgrade pip setuptools wheel
+.venv/bin/python -m pip install -r requirements-linux-lock.txt
+CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=61" \
+  CUDACXX=/usr/local/cuda-12.9/bin/nvcc \
+  PATH="$(pwd)/.spack-env/view/bin:/usr/local/cuda-12.9/bin:$PATH" \
+  .venv/bin/python -m pip install --no-deps --editable .
+```
+
+Activate it in later shells and run the non-destructive reference validation:
+
+```bash
+source scripts/activate-dosecuda.sh
+python tests/validate_cuda_jax_reference.py
+```
+
+The validation runs both implementations in memory and does not overwrite the
+committed NRRD reference outputs.
+
 ## Prerequisites
 Before installing DoseCUDA, ensure you have the following dependencies installed:
 - **Python 3.6+**
@@ -186,4 +217,4 @@ Differentiable implementation of the PB algorithm in Jax.
       ```
 
 4. **CUDA Architecture Configuration**
-   - Changed line 6 of CMakeLists.txt from `set(CMAKE_CUDA_ARCHITECTURES native)` to `CMAKE_CUDA_ARCHITECTURES 86` in order to successfully run on Lambda Cloud. 
+   - Changed line 6 of CMakeLists.txt from `set(CMAKE_CUDA_ARCHITECTURES native)` to `CMAKE_CUDA_ARCHITECTURES 86` in order to successfully run on Lambda Cloud.

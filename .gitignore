@@ -8,6 +8,7 @@ __pycache__/
 *.npy
 *.nrrd
 test_phantom_output/optimization/
+test_phantom_output/native_gtx1080ti/
 
 # Distribution / packaging
 *.egg-info/
@@ -21,6 +22,7 @@ dosecuda-env/
 *.venv
 env/
 venv/
+.spack-env/
 
 # Jupyter Notebooks
 .ipynb_checkpoints/

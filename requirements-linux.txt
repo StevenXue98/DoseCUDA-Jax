@@ -1,0 +1,13 @@
+# Reconstructed CUDA 12 baseline for native Linux.
+#
+# Install these before installing DoseCUDA itself with --no-deps. The
+# project's broad jax[cuda12] dependency would otherwise resolve to whatever
+# the newest JAX release is at installation time.
+numpy==1.26.4
+jax[cuda12]==0.5.2
+optax==0.2.4
+pydicom==3.0.1
+SimpleITK==2.5.3
+pandas==2.2.2
+pynrrd==1.1.3
+matplotlib==3.9.2

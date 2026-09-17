@@ -1,0 +1,18 @@
+spack:
+  specs:
+  - "python@3.10.20"
+  - "cmake@3.28:"
+  - ninja
+  - "cuda@12.9.0"
+
+  concretizer:
+    unify: true
+
+  view: .spack-env/view
+
+  packages:
+    cuda:
+      buildable: false
+      externals:
+      - spec: cuda@12.9.0
+        prefix: /usr/local/cuda-12.9

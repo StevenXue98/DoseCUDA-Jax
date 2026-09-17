@@ -5,9 +5,14 @@ sys.path.append(os.path.dirname(__file__))
 import numpy as np
 import pandas as pd
 import pydicom as pyd
-import pkg_resources
-import dose_kernels
+from importlib.resources import files
+from . import dose_kernels
 from dataclasses import dataclass
+
+
+def _resource_filename(relative_path):
+    """Return a filesystem path to a resource bundled with DoseCUDA."""
+    return str(files(__package__).joinpath(relative_path))
 
 @dataclass
 class IMRTPhotonEnergy:
@@ -113,7 +118,7 @@ class IMRTDoseGrid(DoseGrid):
 
     def DensityFromHU(self, machine_name):
                 
-        density_table_path = pkg_resources.resource_filename(__name__, os.path.join("lookuptables", "photons", machine_name, "HU_Density.csv"))
+        density_table_path = _resource_filename(os.path.join("lookuptables", "photons", machine_name, "HU_Density.csv"))
         df_density = pd.read_csv(density_table_path)
 
         hu_curve = df_density["HU"].to_numpy()
@@ -179,7 +184,7 @@ class IMRTPlan(Plan):
 
         self.machine_name = machine_name
 
-        energy_list = pd.read_csv(pkg_resources.resource_filename(__name__, os.path.join("lookuptables", "photons", machine_name, "energy_labels.csv")))
+        energy_list = pd.read_csv(_resource_filename(os.path.join("lookuptables", "photons", machine_name, "energy_labels.csv")))
         self.dicom_energy_label = energy_list["dicom_energy_label"]
         self.folder_energy_label = energy_list["folder_energy_label"]
 
@@ -194,7 +199,7 @@ class IMRTPlan(Plan):
         path_to_model = os.path.join("lookuptables", "photons", machine_name)
         
         # Load MLC geometry
-        mlc_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "mlc_geometry.csv"))
+        mlc_geometry_path = _resource_filename(os.path.join(path_to_model, "mlc_geometry.csv"))
         mlc_geometry = pd.read_csv(mlc_geometry_path)
         
         beam_model.mlc_index = mlc_geometry["mlc_pair_index"].to_numpy()
@@ -203,16 +208,16 @@ class IMRTPlan(Plan):
         beam_model.n_mlc_pairs = len(beam_model.mlc_index)
 
         # Load kernel
-        kernel_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
+        kernel_path = _resource_filename(os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
         kernel = pd.read_csv(kernel_path)
         beam_model.kernel = np.array(kernel.to_numpy(), dtype=np.single)
 
         # Load machine geometry
-        machine_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "machine_geometry.csv"))
+        machine_geometry_path = _resource_filename(os.path.join(path_to_model, "machine_geometry.csv"))
         self._load_machine_geometry(beam_model, machine_geometry_path)
 
         # Load beam parameters
-        beam_parameter_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "beam_parameters.csv"))
+        beam_parameter_path = _resource_filename(os.path.join(path_to_model, folder_energy_label, "beam_parameters.csv"))
         self._load_beam_parameters(beam_model, beam_parameter_path)
 
         # Validate all parameters are loaded

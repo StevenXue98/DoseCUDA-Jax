@@ -8,10 +8,15 @@ import pydicom as pyd
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian, RTIonPlanStorage
 import datetime
-import pkg_resources
-import dose_kernels
+from importlib.resources import files
+from . import dose_kernels
 import os
 import SimpleITK as sitk
+
+
+def _resource_filename(relative_path):
+    """Return a filesystem path to a resource bundled with DoseCUDA."""
+    return str(files(__package__).joinpath(relative_path))
 
 
 def get_roi_num(rt_ds, ROIName):
@@ -67,7 +72,7 @@ class IMPTBeamModel():
         self.dicom_rangeshifter_label = dicom_rangeshifter_label
 
         # import the machine geometry
-        machine_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "machine_geometry.csv"))
+        machine_geometry_path = _resource_filename(os.path.join(path_to_model, "machine_geometry.csv"))
 
         self.VSADX = None
         self.VSADY = None
@@ -87,7 +92,7 @@ class IMPTBeamModel():
 
 
         # import LUT for this rangeshifter
-        energy_list_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_rangeshifter_label, "energies.csv"))
+        energy_list_path = _resource_filename(os.path.join(path_to_model, folder_rangeshifter_label, "energies.csv"))
         self.energy_table = pd.read_csv(energy_list_path)
 
         self.energy_labels = self.energy_table["energy_label"].to_numpy()
@@ -106,7 +111,7 @@ class IMPTBeamModel():
             lut_idds = []
             divergence_params = []
             
-            lut_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_rangeshifter_label, "energy_%03d.csv" % energy_id))
+            lut_path = _resource_filename(os.path.join(path_to_model, folder_rangeshifter_label, "energy_%03d.csv" % energy_id))
 
             with open(lut_path, "r") as f:
                 f.readline() # header
@@ -157,7 +162,7 @@ class IMPTDoseGrid(DoseGrid):
 
     def RLSPFromHU(self, machine_name):
 
-        rlsp_table_path = pkg_resources.resource_filename(__name__, os.path.join("lookuptables", "protons", machine_name, "HU_RLSP.csv"))
+        rlsp_table_path = _resource_filename(os.path.join("lookuptables", "protons", machine_name, "HU_RLSP.csv"))
         df_rlsp = pd.read_csv(rlsp_table_path)
 
         hu_curve = df_rlsp["HU"].to_numpy()
@@ -333,7 +338,7 @@ class IMPTPlan(Plan):
         super().__init__()
         self.machine_name = machine_name
 
-        rangeshifter_list = pd.read_csv(pkg_resources.resource_filename(__name__, os.path.join("lookuptables", "protons", machine_name, "rangeshifter_labels.csv")))
+        rangeshifter_list = pd.read_csv(_resource_filename(os.path.join("lookuptables", "protons", machine_name, "rangeshifter_labels.csv")))
         self.dicom_rangeshifter_label = rangeshifter_list["dicom_rangeshifter_label"]
         self.folder_rangeshifter_label = rangeshifter_list["folder_rangeshifter_label"]
 
