@@ -54,14 +54,17 @@ python -m unittest tests/test_indexing_contract.py
 python tests/validate_noncubic_cuda_jax.py
 python tests/validate_cuda_jax_matrix.py
 python tests/validate_spot_weight_gradients.py
+python tests/validate_spot_position_gradients.py
 python tests/validate_cuda_jax_reference.py
 python tests/test_head_and_neck.py
 ```
 
-All six are read-only by default. The matrix covers both non-cubic axis
+All seven are read-only by default. The matrix covers both non-cubic axis
 orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
-gradient validation compares JAX autodiff with central finite differences and
-independent unit-spot dose responses.
+gradient validations compare JAX autodiff with central finite differences.
+The weight test also checks independent unit-spot dose responses. The position
+test holds WET and beam geometry fixed, so it validates the smooth lateral
+pencil-beam path but does not claim differentiability through ray tracing.
 
 To generate a fresh non-cubic ring visualization and explore arbitrary slices:
 
