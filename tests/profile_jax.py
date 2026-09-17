@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 # Import internal functions for profiling
-from impt_jax_fix import (
+from impt_jax import (
     _precompute_all_grids,
     _raytrace_kernel,
     _smooth_wet_kernel,

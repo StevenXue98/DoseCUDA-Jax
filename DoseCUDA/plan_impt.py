@@ -171,9 +171,10 @@ class IMPTDoseGrid(DoseGrid):
         rlsp = np.array(np.interp(self.HU, hu_curve, rlsp_curve), dtype=np.single)
         
         return rlsp
-    
+
     def computeIMPTPlan(self, plan, gpu_id=0):
 
+        self._validate_geometry()
         self.beam_doses = []
         self.dose = np.zeros(self.size, dtype=np.single)
         self.RLSP = self.RLSPFromHU(plan.machine_name)
@@ -285,8 +286,8 @@ class IMPTDoseGrid(DoseGrid):
             beam_wet = dose_kernels.proton_raytrace_cuda(beam_model, rlsp_object, beam, gpu_id)
 
             HU_img = sitk.GetImageFromArray(beam_wet)
-            HU_img.SetOrigin(self.origin)
-            HU_img.SetSpacing(self.spacing)
+            HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+            HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
             fw.SetFileName(wet_path.replace(".nrrd", "_beam%02i.nrrd" % (i+1)))
             fw.Execute(HU_img)
@@ -323,7 +324,7 @@ class IMPTBeam(Beam):
         self.spot_list[:, 3] = energy_id
 
     def addSingleSpot(self, x, y, mu, energy_id):
-        spot = np.array([x, y, mu, energy_id], dtype=np.single)
+        spot = np.array([[x, y, mu, energy_id]], dtype=np.single)
         self.spot_list = np.vstack((self.spot_list, spot)) if self.n_spots > 0 else spot
         self.n_spots += 1
 

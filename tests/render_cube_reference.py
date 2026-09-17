@@ -19,7 +19,7 @@ JAX_DIRECTORY = os.path.join(REPOSITORY_ROOT, "DoseCUDA", "Jax")
 sys.path.insert(0, JAX_DIRECTORY)
 
 from DoseCUDA import IMPTDoseGrid  # noqa: E402
-from impt_jax_fix import computeIMPTPlanJax  # noqa: E402
+from impt_jax import computeIMPTPlanJax  # noqa: E402
 from validate_cuda_jax_reference import create_test_plan  # noqa: E402
 
 

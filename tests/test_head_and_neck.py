@@ -5,14 +5,14 @@ This test validates that JAX dose calculation matches CUDA using:
 1. A cube phantom (symmetric, well-tested case)
 2. Real HEAD_AND_NECK CT data from matRad
 
-Note: Due to axis ordering differences between JAX and external CT data,
-the HEAD_AND_NECK test currently only validates that both produce
-reasonable dose distributions, not exact voxel-by-voxel match.
+NumPy dose and CT arrays use (z, y, x) order throughout. Physical metadata
+(origin, spacing, isocenter) uses (x, y, z), matching SimpleITK and DICOM.
 
 Usage:
     python test_head_and_neck.py           # Silent mode (default) - only shows PASS/FAIL
     python test_head_and_neck.py -v        # Verbose mode - shows detailed output
     python test_head_and_neck.py --verbose # Verbose mode - shows detailed output
+    python test_head_and_neck.py --write-output  # Also replace diagnostic dose files
 """
 
 import os
@@ -21,14 +21,12 @@ import argparse
 import numpy as np
 import SimpleITK as sitk
 
-# Add project root to path for utils module (but after site-packages so DoseCUDA uses installed version)
-sys.path.append('/home/ubuntu/DoseCUDA-Jax')
-
-# Add Jax folder to path for impt_jax_fix
-sys.path.insert(0, '/home/ubuntu/DoseCUDA-Jax/DoseCUDA/Jax')
+REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPOSITORY_ROOT)
+sys.path.insert(0, os.path.join(REPOSITORY_ROOT, 'DoseCUDA', 'Jax'))
 
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from impt_jax_fix import computeIMPTPlanJax
+from impt_jax import computeIMPTPlanJax
 from utils.matrad_converter import MatRadData, convert_to_dosecuda
 
 
@@ -43,20 +41,8 @@ def vprint(*args, **kwargs):
 
 
 def load_ct_from_nrrd(dose_grid, nrrd_path):
-    """Load CT from NRRD file into DoseCUDA dose grid.
-    
-    DoseCUDA internally uses (x, y, z) ordering for the HU array,
-    while SimpleITK/NRRD uses (z, y, x) ordering.
-    """
-    ct = sitk.ReadImage(nrrd_path)
-    
-    # SimpleITK returns (z, y, x) - transpose to (x, y, z) for DoseCUDA
-    hu_zyx = np.array(sitk.GetArrayFromImage(ct), dtype=np.float32)
-    dose_grid.HU = np.transpose(hu_zyx, (2, 1, 0))  # (z,y,x) -> (x,y,z)
-    
-    dose_grid.origin = np.array(ct.GetOrigin(), dtype=np.float32)
-    dose_grid.spacing = np.array(ct.GetSpacing(), dtype=np.float32)
-    dose_grid.size = np.array(dose_grid.HU.shape)  # Now (x, y, z)
+    """Load a SimpleITK image without changing its NumPy (z, y, x) order."""
+    dose_grid.loadCTNRRD(nrrd_path)
 
 
 def create_target_spots(beam, beam_model, target_center, target_radius=30.0, 
@@ -95,8 +81,7 @@ def create_target_spots(beam, beam_model, target_center, target_radius=30.0,
 def compare_doses(cuda_dose, jax_dose):
     """Compare CUDA and JAX dose arrays and return pass/fail status.
     
-    Both CUDA and JAX should output in the same (ni, nj, nk) order when
-    dose.HU is in that order. No transpose needed for comparison.
+    Both engines must return the same (z, y, x) shape as the input CT.
     
     Returns:
         tuple: (passed: bool, max_rel_diff: float, pass_rate: float)
@@ -104,14 +89,7 @@ def compare_doses(cuda_dose, jax_dose):
     # Check shapes match
     if jax_dose.shape != cuda_dose.shape:
         vprint(f"  WARNING: Shape mismatch - CUDA: {cuda_dose.shape}, JAX: {jax_dose.shape}")
-        # For non-symmetric phantoms, JAX output may need transpose
-        # JAX outputs (nk, nj, ni) when input HU is (ni, nj, nk)
-        jax_dose_transposed = np.transpose(jax_dose, (2, 1, 0))
-        if jax_dose_transposed.shape == cuda_dose.shape:
-            vprint(f"  Transposed JAX dose from {jax_dose.shape} to {jax_dose_transposed.shape}")
-            jax_dose = jax_dose_transposed
-        else:
-            return False, 0.0, 0.0
+        return False, 0.0, 0.0
     
     # Mask where both have significant dose
     mask = (cuda_dose > cuda_dose.max() * 0.01) | (jax_dose > jax_dose.max() * 0.01)
@@ -193,14 +171,14 @@ def test_cube_phantom():
     return passed, pass_rate
 
 
-def test_head_and_neck():
+def test_head_and_neck(write_output=False):
     """Test CUDA vs JAX on HEAD_AND_NECK phantom with real CT data."""
     vprint("\n" + "="*60)
     vprint("TEST 2: HEAD_AND_NECK Phantom (Real CT)")
     vprint("="*60)
     
     # Output directory
-    output_dir = '/home/ubuntu/DoseCUDA-Jax/test_phantom_output/head_and_neck'
+    output_dir = os.path.join(REPOSITORY_ROOT, 'test_phantom_output', 'head_and_neck')
     os.makedirs(output_dir, exist_ok=True)
     
     # Load matRad data
@@ -275,22 +253,20 @@ def test_head_and_neck():
     vprint(f"  Voxels within 1% of max: {tol_1pct:.2f}%")
     vprint(f"  Voxels within 5% of max: {tol_5pct:.2f}%")
     
-    # Save dose results as NRRD for visualization
-    vprint(f"\n  Saving dose results to {output_dir}...")
-    
-    # Save CUDA dose
-    cuda_dose_img = sitk.GetImageFromArray(np.transpose(cuda_dose, (2, 1, 0)))  # (x,y,z) -> (z,y,x) for NRRD
-    cuda_dose_img.SetOrigin(dose.origin.tolist())
-    cuda_dose_img.SetSpacing(dose.spacing.tolist())
-    sitk.WriteImage(cuda_dose_img, os.path.join(output_dir, 'dose_cuda.nrrd'))
-    
-    # Save JAX dose
-    jax_dose_img = sitk.GetImageFromArray(np.transpose(jax_dose, (2, 1, 0)))
-    jax_dose_img.SetOrigin(dose.origin.tolist())
-    jax_dose_img.SetSpacing(dose.spacing.tolist())
-    sitk.WriteImage(jax_dose_img, os.path.join(output_dir, 'dose_jax.nrrd'))
-    
-    vprint(f"  Saved: dose_cuda.nrrd, dose_jax.nrrd")
+    if write_output:
+        vprint(f"\n  Saving dose results to {output_dir}...")
+
+        cuda_dose_img = sitk.GetImageFromArray(cuda_dose)
+        cuda_dose_img.SetOrigin(dose.origin.tolist())
+        cuda_dose_img.SetSpacing(dose.spacing.tolist())
+        sitk.WriteImage(cuda_dose_img, os.path.join(output_dir, 'dose_cuda.nrrd'))
+
+        jax_dose_img = sitk.GetImageFromArray(jax_dose)
+        jax_dose_img.SetOrigin(dose.origin.tolist())
+        jax_dose_img.SetSpacing(dose.spacing.tolist())
+        sitk.WriteImage(jax_dose_img, os.path.join(output_dir, 'dose_jax.nrrd'))
+
+        vprint("  Saved: dose_cuda.nrrd, dose_jax.nrrd")
     
     # For HEAD_AND_NECK, pass if >99% within 1% tolerance
     max_ratio = max(cuda_max, jax_max) / max(min(cuda_max, jax_max), 1e-8)
@@ -310,6 +286,8 @@ def main():
     )
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose output')
+    parser.add_argument('--write-output', action='store_true',
+                        help='Write diagnostic NRRD files (disabled by default)')
     args = parser.parse_args()
     VERBOSE = args.verbose
     
@@ -324,7 +302,7 @@ def main():
         all_passed = False
     
     # Test 2: HEAD_AND_NECK (sanity check)
-    passed2, tol_1pct = test_head_and_neck()
+    passed2, tol_1pct = test_head_and_neck(write_output=args.write_output)
     if passed2:
         print(f"PASS: HEAD_AND_NECK test ({tol_1pct:.2f}% within 1% tolerance)")
     else:

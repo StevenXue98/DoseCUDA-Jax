@@ -41,8 +41,8 @@ dose_jax = computeIMPTPlanJax(dose, plan)
 
 # write the Pure JAX dose to a file
 dose_img = sitk.GetImageFromArray(dose_jax.astype(np.float32))
-dose_img.SetOrigin(dose.origin)
-dose_img.SetSpacing(dose.spacing)
+dose_img.SetOrigin(dose.origin.tolist())
+dose_img.SetSpacing(dose.spacing.tolist())
 sitk.WriteImage(dose_img, "test_phantom_output/cube_impt_dose_jax.nrrd")
 
 # write the CT to a file

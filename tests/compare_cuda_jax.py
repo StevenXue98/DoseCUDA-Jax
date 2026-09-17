@@ -172,14 +172,14 @@ def main():
     
     # Save CUDA dose
     cuda_img = sitk.GetImageFromArray(cuda_result.astype(np.float32))
-    cuda_img.SetOrigin(dose_cuda.origin)
-    cuda_img.SetSpacing(dose_cuda.spacing)
+    cuda_img.SetOrigin(dose_cuda.origin.tolist())
+    cuda_img.SetSpacing(dose_cuda.spacing.tolist())
     sitk.WriteImage(cuda_img, os.path.join(output_dir, "cube_impt_dose.nrrd"))
     
     # Save JAX dose
     jax_img = sitk.GetImageFromArray(jax_result2.astype(np.float32))
-    jax_img.SetOrigin(dose_cuda.origin)
-    jax_img.SetSpacing(dose_cuda.spacing)
+    jax_img.SetOrigin(dose_cuda.origin.tolist())
+    jax_img.SetSpacing(dose_cuda.spacing.tolist())
     sitk.WriteImage(jax_img, os.path.join(output_dir, "cube_impt_dose_jax.nrrd"))
     
     # Save CT (same for both, just save once)

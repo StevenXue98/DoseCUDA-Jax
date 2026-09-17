@@ -29,10 +29,11 @@ import os
 import sys
 
 # Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPOSITORY_ROOT)
 
 from DoseCUDA import IMPTPlan, IMPTBeam, IMPTDoseGrid
-from DoseCUDA.Jax.impt_jax_fix import (
+from DoseCUDA.Jax.impt_jax import (
     compute_raytrace, compute_dose, compute_impt_dose,
     DoseParams, BeamParams, LUTData, SpotData, LayerData,
     _precompute_all_grids
@@ -217,9 +218,9 @@ def compute_dose_influence_matrix(plan, dose_grid, beam_index=0, target_mask=Non
         # Single layer
         r80 = beam_model.divergence_params[energy_id, 1]
         layer_data = LayerData(
-            layers_spot_start=jnp.array([0], dtype=jnp.int32),
-            layers_n_spots=jnp.array([1], dtype=jnp.int32),
-            layers_energy_id=jnp.array([energy_id], dtype=jnp.int32),
+            layers_spot_start=(0,),
+            layers_n_spots=(1,),
+            layers_energy_id=(energy_id,),
             layers_r80=jnp.array([r80], dtype=jnp.float32),
             n_layers=1
         )
@@ -410,7 +411,9 @@ def main():
     
     # Load matRad data
     print("\nLoading HEAD_AND_NECK data...")
-    data_path = "/home/ubuntu/DoseCUDA-Jax/data/matrad/phantoms/HEAD_AND_NECK.mat"
+    data_path = os.path.join(
+        REPOSITORY_ROOT, 'data', 'matrad', 'phantoms', 'HEAD_AND_NECK.mat'
+    )
     mat = sio.loadmat(data_path, simplify_cells=True)
     
     ct_data = mat['ct']
@@ -419,7 +422,7 @@ def main():
     # Find PTV70 target
     target_name = None
     target_rx = None
-    target_mask = None
+    target_mask_xyz = None
     ct_shape = ct_data['cube'].shape
     
     for i, row in enumerate(cst_data):
@@ -440,7 +443,7 @@ def main():
                 i_idx, j_idx, k_idx = np.unravel_index(indices, ct_shape, order='F')
                 mask = np.zeros(ct_shape, dtype=bool)
                 mask[i_idx, j_idx, k_idx] = True
-                target_mask = mask
+                target_mask_xyz = mask
                 print(f"Found target: {name}, Rx: {target_rx} Gy")
         
         # Stop after finding PTV70 (highest priority target)
@@ -448,13 +451,15 @@ def main():
             break
     
     print(f"Target: {target_name}, Rx: {target_rx} Gy")
-    print(f"Target voxels: {np.sum(target_mask)}")
+    print(f"Target voxels: {np.sum(target_mask_xyz)}")
     
     # Create plan
     plan = IMPTPlan("HitachiProbeatJHU")
     
     # Set CT data
-    ct_cube = ct_data['cube'].astype(np.float32)
+    ct_cube_xyz = ct_data['cube'].astype(np.float32)
+    ct_cube = np.transpose(ct_cube_xyz, (2, 1, 0))
+    target_mask = np.transpose(target_mask_xyz, (2, 1, 0))
     # Resolution is a dict with x, y, z keys
     ct_resolution = np.array([ct_data['resolution']['x'], 
                                ct_data['resolution']['y'], 
@@ -475,7 +480,7 @@ def main():
     dose_grid.size = np.array(ct_cube.shape)
     
     # Find target center for beam setup using matRad coordinates
-    target_indices = np.where(target_mask)
+    target_indices = np.where(target_mask_xyz)
     target_center = np.array([
         x_coords[int(np.mean(target_indices[0]))],  # X from indices along axis 0
         y_coords[int(np.mean(target_indices[1]))],  # Y from indices along axis 1
@@ -497,7 +502,7 @@ def main():
     # Calculate spot grid from target geometry
     # For gantry 0°: BEV x -> patient X, BEV y -> patient Z
     # Target bounding box (computed earlier from matRad indices):
-    target_where = np.where(target_mask)
+    target_where = np.where(target_mask_xyz)
     target_x_min = x_coords[target_where[0].min()]
     target_x_max = x_coords[target_where[0].max()]
     target_y_min = y_coords[target_where[1].min()]  # Depth direction
@@ -529,12 +534,12 @@ def main():
     # Need to find energies whose R80 matches the WET to target
     # For now, estimate WET ≈ geometric depth * avg density
     # Surface is at max Y where density > 0.1
-    density_profile = ct_cube[:, :, ct_cube.shape[2]//2].mean(axis=0)  # Avg density vs Y
+    density_profile = ct_cube_xyz[:, :, ct_cube_xyz.shape[2]//2].mean(axis=0)
     surface_idx = np.where(density_profile > 0.1)[0][-1]  # Last Y index with tissue
     surface_y = y_coords[surface_idx]
     
     # WET from surface to target (rough estimate: depth * avg_density)
-    avg_density = ct_cube[target_mask].mean()
+    avg_density = ct_cube_xyz[target_mask_xyz].mean()
     wet_proximal = (surface_y - target_y_max) * avg_density
     wet_distal = (surface_y - target_y_min) * avg_density
     

@@ -80,7 +80,7 @@ class BeamParams(NamedTuple):
 ```python
 class DoseParams(NamedTuple):
     """Dose grid parameters."""
-    ni, nj, nk  # Grid dimensions (x, y, z voxel counts)
+    ni, nj, nk  # Historical names for array dimensions (z, y, x)
     spacing     # Isotropic voxel spacing [mm]
 ```
 
@@ -129,14 +129,16 @@ class SpotData(NamedTuple):
 ```python
 class LayerData(NamedTuple):
     """Energy layer data for efficient layer-by-layer processing."""
-    layers_spot_start  # Starting index in spot arrays for each layer
-    layers_n_spots     # Number of spots in each layer
-    layers_energy_id   # Energy index for each layer
+    layers_spot_start  # Static tuple: starting index for each layer
+    layers_n_spots     # Static tuple: number of spots in each layer
+    layers_energy_id   # Static tuple: energy index for each layer
     layers_r80         # R80 (80% range) for each layer [mm]
     n_layers           # Total number of active energy layers
 ```
 
 **Source:** Constructed from sorted `SpotData` by `_extract_layer_data()`.
+The discrete topology is static so JAX can trace continuous spot weights
+without attempting to convert traced values to Python integers.
 
 ---
 
@@ -442,7 +444,7 @@ def _pencil_beam_single_layer(...) -> jnp.ndarray
 | `coef0, coef1, coef2` | Air scattering coefficients |
 | `spots_x, spots_y, spots_mu` | Spot positions and weights |
 
-**Output:** Dose array [nk, nj, ni] (z, y, x order for NRRD)
+**Output:** Dose array `[ni, nj, nk]`, preserving the input `(z, y, x)` shape
 
 **Algorithm (Double-Gaussian Model):**
 
@@ -487,9 +489,9 @@ def _pencil_beam_single_layer(...) -> jnp.ndarray
    
    $$D = \text{MU} \times \left[ (1 - w_{halo}) \cdot \frac{\text{IDD}}{2\pi\sigma_{total}^2} \cdot e^{-\frac{d_{CAX}^2}{2\sigma_{total}^2}} + w_{halo} \cdot \frac{\text{IDD}}{2\pi\sigma_{halo}^2} \cdot e^{-\frac{d_{CAX}^2}{2\sigma_{halo}^2}} \right]$$
 
-7. **Accumulate dose and transpose to output order:**
+7. **Accumulate dose in the input array order:**
    ```python
-   dose_array = dose.transpose(2, 1, 0)  # (x,y,z) → (z,y,x)
+   dose_array += spot_dose  # remains (z, y, x)
    ```
 
 **Connection to Paper:** This implements the core double-Gaussian pencil beam algorithm from Equation (1-3) in the paper (Section 2.2).
@@ -613,7 +615,7 @@ def computeIMPTPlanJax(dose_grid: IMPTDoseGrid, plan: IMPTPlan) -> np.ndarray
 | `dose_grid` | `IMPTDoseGrid` object containing CT/phantom data, RLSP conversion |
 | `plan` | `IMPTPlan` object with beam list, machine name, fractionation |
 
-**Output:** 3D numpy array of dose values, shape `(nk, nj, ni)` matching `dose_grid.size` order
+**Output:** 3D NumPy array of dose values with the same `(z, y, x)` shape as `dose_grid.HU`
 
 **Algorithm:**
 ```python
@@ -785,7 +787,7 @@ where $d_{CAX}$ is the distance from voxel to the central axis of the proton pen
 |--------|---|---|---|-------|
 | Image/DICOM | Right-Left | Anterior-Posterior | Inferior-Superior | Patient coordinates |
 | BEV/Head | Lateral (cross-plane) | Depth (beam direction) | Vertical (in-plane) | Rotated by gantry+couch |
-| Array Index | i (fastest) | j | k (slowest) | C-order memory layout |
+| NumPy array | axis 2 (fastest) | axis 1 | axis 0 (slowest) | Shape is `(z, y, x)` in C order |
 
 ---
 

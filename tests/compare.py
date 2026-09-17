@@ -16,7 +16,7 @@ output_dir = os.path.join(os.path.dirname(script_dir), "test_phantom_output")
 sys.path.insert(0, jax_dir)
 
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from impt_jax_fix import computeIMPTPlanJax
+from impt_jax import computeIMPTPlanJax
 import jax.numpy as jnp
 
 # Ensure output directory exists
@@ -120,12 +120,10 @@ def compare_doses(cuda_dose, jax_dose):
 
 
 def main():
-    # Use ASYMMETRIC phantom to expose coordinate bugs
-    # size parameter: createCubePhantom interprets as [dim0, dim1, dim2]
-    # Using different values to catch x/z swap issues
-    # Needs to be large enough for the 98-spot beam pattern (radius 100)
-    phantom_size = [138, 138, 138]  # Asymmetric for debugging, larger for beam coverage
-    print(f"Setting up ASYMMETRIC cube phantom with size={phantom_size}...")
+    # Keep this output-generating script on the historical reference geometry.
+    # Use validate_noncubic_cuda_jax.py for the read-only axis-swap regression.
+    phantom_size = (138, 138, 138)
+    print(f"Setting up historical cube phantom with size={phantom_size}...")
     
     # Create dose grids for CUDA and JAX
     dose_cuda = IMPTDoseGrid()
@@ -187,14 +185,14 @@ def main():
     
     # Save CUDA dose
     cuda_img = sitk.GetImageFromArray(cuda_result.astype(np.float32))
-    cuda_img.SetOrigin(dose_cuda.origin)
-    cuda_img.SetSpacing(dose_cuda.spacing)
+    cuda_img.SetOrigin(dose_cuda.origin.tolist())
+    cuda_img.SetSpacing(dose_cuda.spacing.tolist())
     sitk.WriteImage(cuda_img, os.path.join(output_dir, "cube_impt_dose.nrrd"))
     
     # Save JAX dose
     jax_img = sitk.GetImageFromArray(jax_result2.astype(np.float32))
-    jax_img.SetOrigin(dose_cuda.origin)
-    jax_img.SetSpacing(dose_cuda.spacing)
+    jax_img.SetOrigin(dose_cuda.origin.tolist())
+    jax_img.SetSpacing(dose_cuda.spacing.tolist())
     sitk.WriteImage(jax_img, os.path.join(output_dir, "cube_impt_dose_jax.nrrd"))
     
     # Save CT (same for both, just save once)

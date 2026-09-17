@@ -9,6 +9,7 @@ __pycache__/
 *.nrrd
 test_phantom_output/optimization/
 test_phantom_output/native_gtx1080ti/
+test_phantom_output/noncubic_indexing/
 
 # Distribution / packaging
 *.egg-info/

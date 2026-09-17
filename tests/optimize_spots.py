@@ -28,11 +28,12 @@ import optax  # JAX optimization library
 import SimpleITK as sitk
 
 # Add paths
-sys.path.append('/home/ubuntu/DoseCUDA-Jax')
-sys.path.insert(0, '/home/ubuntu/DoseCUDA-Jax/DoseCUDA/Jax')
+REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPOSITORY_ROOT)
+sys.path.insert(0, os.path.join(REPOSITORY_ROOT, 'DoseCUDA', 'Jax'))
 
 from DoseCUDA import IMPTDoseGrid, IMPTPlan, IMPTBeam
-from impt_jax_fix import (
+from impt_jax import (
     computeIMPTPlanJax,
     _extract_beam_params, _extract_lut_data, _extract_spot_data, _extract_layer_data,
     _precompute_all_grids, compute_raytrace, _pencil_beam_single_layer,
@@ -368,13 +369,8 @@ class SpotWeightOptimizer:
 
 
 def load_ct_from_nrrd(dose_grid, nrrd_path):
-    """Load CT from NRRD file into DoseCUDA dose grid."""
-    ct = sitk.ReadImage(nrrd_path)
-    hu_zyx = np.array(sitk.GetArrayFromImage(ct), dtype=np.float32)
-    dose_grid.HU = np.transpose(hu_zyx, (2, 1, 0))
-    dose_grid.origin = np.array(ct.GetOrigin(), dtype=np.float32)
-    dose_grid.spacing = np.array(ct.GetSpacing(), dtype=np.float32)
-    dose_grid.size = np.array(dose_grid.HU.shape)
+    """Load CT in the canonical NumPy (z, y, x) order."""
+    dose_grid.loadCTNRRD(nrrd_path)
 
 
 def main():
@@ -385,7 +381,7 @@ def main():
     print("="*60)
     
     # Output directory
-    output_dir = '/home/ubuntu/DoseCUDA-Jax/test_phantom_output/optimization'
+    output_dir = os.path.join(REPOSITORY_ROOT, 'test_phantom_output', 'optimization')
     os.makedirs(output_dir, exist_ok=True)
     
     # Load matRad data
@@ -401,11 +397,12 @@ def main():
     
     # Create dose grid and load CT
     dose = IMPTDoseGrid()
-    ct_path = '/home/ubuntu/DoseCUDA-Jax/test_phantom_output/head_and_neck/ct.nrrd'
+    head_and_neck_dir = os.path.join(REPOSITORY_ROOT, 'test_phantom_output', 'head_and_neck')
+    ct_path = os.path.join(head_and_neck_dir, 'ct.nrrd')
     
     if not os.path.exists(ct_path):
         print("Converting CT...")
-        convert_to_dosecuda(matrad_data, '/home/ubuntu/DoseCUDA-Jax/test_phantom_output/head_and_neck', 
+        convert_to_dosecuda(matrad_data, head_and_neck_dir,
                            resample_spacing=3.0)
     
     load_ct_from_nrrd(dose, ct_path)
@@ -446,19 +443,18 @@ def main():
     
     # Get target mask (need to match CT shape after resampling)
     # Load from saved NRRD if available, otherwise create from matRad
-    target_mask_path = f'/home/ubuntu/DoseCUDA-Jax/test_phantom_output/head_and_neck/mask_{target_name}.nrrd'
+    target_mask_path = os.path.join(head_and_neck_dir, f'mask_{target_name}.nrrd')
     if os.path.exists(target_mask_path):
         target_mask_img = sitk.ReadImage(target_mask_path)
-        target_mask_zyx = np.array(sitk.GetArrayFromImage(target_mask_img), dtype=np.float32)
-        target_mask = np.transpose(target_mask_zyx, (2, 1, 0))  # (z,y,x) -> (x,y,z)
+        target_mask = np.array(sitk.GetArrayFromImage(target_mask_img), dtype=np.float32)
     else:
         print(f"Warning: Target mask not found at {target_mask_path}")
         # Create simple spherical target
-        nx, ny, nz = dose.HU.shape
+        nz, ny, nx = dose.HU.shape
         x = np.arange(nx) * dose.spacing[0] + dose.origin[0]
         y = np.arange(ny) * dose.spacing[1] + dose.origin[1]
         z = np.arange(nz) * dose.spacing[2] + dose.origin[2]
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        Z, Y, X = np.meshgrid(z, y, x, indexing='ij')
         dist = np.sqrt((X - target_center[0])**2 + (Y - target_center[1])**2 + (Z - target_center[2])**2)
         target_mask = (dist < 30.0).astype(np.float32)
     
@@ -497,7 +493,7 @@ def main():
     print(f"\nSaving results to {output_dir}...")
     
     # Save optimized dose
-    dose_img = sitk.GetImageFromArray(np.transpose(final_dose_np, (2, 1, 0)))
+    dose_img = sitk.GetImageFromArray(final_dose_np)
     dose_img.SetOrigin(dose.origin.tolist())
     dose_img.SetSpacing(dose.spacing.tolist())
     sitk.WriteImage(dose_img, os.path.join(output_dir, 'dose_optimized.nrrd'))

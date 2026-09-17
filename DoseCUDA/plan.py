@@ -20,6 +20,12 @@ class Prescription:
 
 
 class DoseGrid:
+    """Voxel grid with NumPy arrays in ``(z, y, x)`` axis order.
+
+    ``origin`` and ``spacing`` follow the SimpleITK/DICOM physical coordinate
+    convention and are therefore ordered ``(x, y, z)``.  ``size`` is always
+    the NumPy array shape, not the SimpleITK image size.
+    """
 
     def __init__(self):
         self.origin = np.array([0.0, 0.0, 0.0], dtype=np.single)
@@ -29,6 +35,30 @@ class DoseGrid:
         self.dose = []
         self.beam_doses = []
         self.FrameOfReferenceUID = ""
+
+    def _validate_geometry(self):
+        """Reject inconsistent grid metadata before entering a dose engine."""
+        hu = np.asarray(self.HU)
+        if hu.ndim != 3:
+            raise ValueError("HU must be a 3-dimensional array in (z, y, x) order")
+
+        size = tuple(int(value) for value in np.asarray(self.size).tolist())
+        if size != hu.shape:
+            raise ValueError(
+                f"size must match HU.shape in (z, y, x) order; got size={size} "
+                f"and HU.shape={hu.shape}"
+            )
+
+        origin = np.asarray(self.origin)
+        spacing = np.asarray(self.spacing)
+        if origin.shape != (3,):
+            raise ValueError("origin must contain three values in (x, y, z) order")
+        if spacing.shape != (3,):
+            raise ValueError("spacing must contain three values in (x, y, z) order")
+        if not np.all(np.isfinite(origin)):
+            raise ValueError("origin values must be finite")
+        if not np.all(np.isfinite(spacing)) or np.any(spacing <= 0.0):
+            raise ValueError("spacing values must be finite and positive")
 
     def loadCTNRRD(self, ct_path):
         fr = sitk.ImageFileReader()
@@ -57,13 +87,14 @@ class DoseGrid:
         self.size = np.array(self.HU.shape)
 
     def resampleCT(self, new_spacing, new_size, new_origin):
+        """Resample using SimpleITK-style ``(x, y, z)`` metadata arguments."""
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         rf = sitk.ResampleImageFilter()
-        rf.SetOutputOrigin(new_origin)
-        rf.SetOutputSpacing(new_spacing)
+        rf.SetOutputOrigin(np.asarray(new_origin, dtype=float).tolist())
+        rf.SetOutputSpacing(np.asarray(new_spacing, dtype=float).tolist())
         rf.SetSize(new_size)
         rf.SetDefaultPixelValue(-1000)
 
@@ -77,11 +108,11 @@ class DoseGrid:
     def resampleCTfromSpacing(self, spacing):
 
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         rf = sitk.ResampleImageFilter()
-        rf.SetOutputOrigin(self.origin)
+        rf.SetOutputOrigin(np.asarray(self.origin, dtype=float).tolist())
         sp_new = (spacing, spacing, spacing)
         sz_new = (int(self.size[2] * self.spacing[0] / sp_new[0]),
                   int(self.size[1] * self.spacing[1] / sp_new[1]),
@@ -104,12 +135,12 @@ class DoseGrid:
         ref_origin = np.array(ref_dose.ImagePositionPatient)
 
         ref_dose_img = sitk.GetImageFromArray(ref_dose.pixel_array)
-        ref_dose_img.SetOrigin(ref_origin)
-        ref_dose_img.SetSpacing(ref_spacing)
+        ref_dose_img.SetOrigin(np.asarray(ref_origin, dtype=float).tolist())
+        ref_dose_img.SetSpacing(np.asarray(ref_spacing, dtype=float).tolist())
 
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         rf = sitk.ResampleImageFilter()
         rf.SetReferenceImage(ref_dose_img)
@@ -184,14 +215,14 @@ class DoseGrid:
 
         fw = sitk.ImageFileWriter()
         dose_img = sitk.GetImageFromArray(np.array(self.dose * RBE, dtype=np.single))
-        dose_img.SetOrigin(self.origin)
-        dose_img.SetSpacing(self.spacing)
+        dose_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        dose_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         if individual_beams:
             for i, beam_dose in enumerate(self.beam_doses):
                 dose_img = sitk.GetImageFromArray(np.array(beam_dose * RBE, dtype=np.single))
-                dose_img.SetOrigin(self.origin)
-                dose_img.SetSpacing(self.spacing)
+                dose_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+                dose_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
                 fw.SetFileName(dose_path.replace(".nrrd", "_beam%02i.nrrd" % (i+1)))
                 fw.Execute(dose_img)
         else:
@@ -205,8 +236,8 @@ class DoseGrid:
 
         fw = sitk.ImageFileWriter()
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         fw.SetFileName(ct_path)
         fw.Execute(HU_img)
@@ -216,17 +247,35 @@ class DoseGrid:
             raise Exception("CT path must have .nii.gz extension")
 
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(np.asarray(self.origin, dtype=float).tolist())
+        HU_img.SetSpacing(np.asarray(self.spacing, dtype=float).tolist())
 
         fw = sitk.ImageFileWriter()
         fw.SetFileName(ct_path)
         fw.Execute(HU_img)
 
-    def createCubePhantom(self, size=[138, 138, 138], spacing=3.0):
-        self.origin = np.array([-size[0] * spacing / 2.0, -size[1] * spacing / 2.0, -size[2] * spacing / 2.0])
+    def createCubePhantom(self, size=(138, 138, 138), spacing=3.0):
+        """Create an air-backed water phantom.
+
+        Args:
+            size: NumPy array shape in ``(z, y, x)`` order.
+            spacing: Isotropic voxel spacing in millimetres.
+        """
+        size = tuple(int(value) for value in size)
+        if len(size) != 3 or any(value <= 0 for value in size):
+            raise ValueError("size must contain three positive values in (z, y, x) order")
+        spacing = float(spacing)
+        if spacing <= 0.0:
+            raise ValueError("spacing must be positive")
+
+        nz, ny, nx = size
+        # Retain the historical half-extent convention so the 138-cube
+        # reference remains reproducible; only map those extents to xyz here.
+        self.origin = np.array(
+            [-nx * spacing / 2.0, -ny * spacing / 2.0, -nz * spacing / 2.0]
+        )
         self.spacing = np.array([spacing, spacing, spacing])
-        self.size = np.array(size)
+        self.size = np.array(size, dtype=np.int64)
         edge = round(10.0 / spacing)
         self.HU = np.ones(size, dtype=np.single) * -1000.0
         self.HU[edge:-edge, edge:-edge, edge:-edge] = 0.0

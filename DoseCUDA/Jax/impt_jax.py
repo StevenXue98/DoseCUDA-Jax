@@ -39,7 +39,7 @@ class BeamParams(NamedTuple):
 
 
 class DoseParams(NamedTuple):
-    """Dose grid parameters."""
+    """Dose grid parameters; ``ni/nj/nk`` are array dimensions z/y/x."""
     ni: int
     nj: int
     nk: int
@@ -65,10 +65,10 @@ class SpotData(NamedTuple):
 
 
 class LayerData(NamedTuple):
-    """Energy layer data."""
-    layers_spot_start: jnp.ndarray
-    layers_n_spots: jnp.ndarray
-    layers_energy_id: jnp.ndarray
+    """Energy layer data with discrete topology held as static Python tuples."""
+    layers_spot_start: Tuple[int, ...]
+    layers_n_spots: Tuple[int, ...]
+    layers_energy_id: Tuple[int, ...]
     layers_r80: jnp.ndarray
     n_layers: int
 
@@ -183,9 +183,10 @@ def _precompute_all_grids(ni: int, nj: int, nk: int,
     )
     
     # Convert to physical coordinates
-    vox_xyz_x = i_indices.astype(jnp.float32) * spacing - iso_x
+    # Arrays use (z, y, x), while physical coordinates use (x, y, z).
+    vox_xyz_x = k_indices.astype(jnp.float32) * spacing - iso_x
     vox_xyz_y = j_indices.astype(jnp.float32) * spacing - iso_y
-    vox_xyz_z = k_indices.astype(jnp.float32) * spacing - iso_z
+    vox_xyz_z = i_indices.astype(jnp.float32) * spacing - iso_z
     
     # Convert to BEV coordinates (image_to_head transform)
     xt = vox_xyz_x * costa + vox_xyz_z * (-sinta)
@@ -204,12 +205,14 @@ def _precompute_all_grids(ni: int, nj: int, nk: int,
     dx = src_x - vox_xyz_x
     dy = src_y - vox_xyz_y
     dz = src_z - vox_xyz_z
-    distance_to_source = jnp.sqrt(dx**2 + dy**2 + dz**2)
+    distance_squared = dx**2 + dy**2 + dz**2
+    distance_to_source = jnp.sqrt(distance_squared)
     
     # Unit vectors toward source
-    uvec_x = dx / distance_to_source
-    uvec_y = dy / distance_to_source
-    uvec_z = dz / distance_to_source
+    inv_distance = jax.lax.rsqrt(distance_squared)
+    uvec_x = dx * inv_distance
+    uvec_y = dy * inv_distance
+    uvec_z = dz * inv_distance
     
     return PrecomputedGrids(
         i_indices=i_indices,
@@ -258,18 +261,20 @@ def _raytrace_kernel(ni: int, nj: int, nk: int,
         ray_y = vox_xyz_y + uvec_y * ray_length
         ray_z = vox_xyz_z + uvec_z * ray_length
         
-        # Convert ray position to array index coordinates for map_coordinates
-        # Note: scipy/JAX map_coordinates uses (i, j, k) directly for voxel [i][j][k]
-        # (No +0.5 offset needed, unlike CUDA 3D textures which use a half-texel offset)
+        # Convert ray position to zero-based array coordinates. CUDA adds 0.5
+        # before sampling because its unnormalized texture coordinates place
+        # voxel centers at half-integers. JAX places voxel centers at integers,
+        # so the sampling coordinate needs no shift, but the valid interval
+        # must still include the same half-voxel border on each side.
         tex_x = (ray_x + iso_x) / spacing
         tex_y = (ray_y + iso_y) / spacing
         tex_z = (ray_z + iso_z) / spacing
         
-        within_bounds = (tex_x >= 0) & (tex_x < ni) & \
-                       (tex_y >= 0) & (tex_y < nj) & \
-                       (tex_z >= 0) & (tex_z < nk)
+        within_bounds = (tex_x >= -0.5) & (tex_x < nk - 0.5) & \
+                       (tex_y >= -0.5) & (tex_y < nj - 0.5) & \
+                       (tex_z >= -0.5) & (tex_z < ni - 0.5)
         
-        coords = jnp.stack([tex_x, tex_y, tex_z], axis=0)
+        coords = jnp.stack([tex_z, tex_y, tex_x], axis=0)
         density = map_coordinates(density_3d, coords, order=1, mode='constant', cval=0.0)
         
         delta_wet = jnp.where(within_bounds, 
@@ -279,7 +284,7 @@ def _raytrace_kernel(ni: int, nj: int, nk: int,
         return wet_sum + delta_wet
     
     wet_array = lax.fori_loop(0, max_steps, ray_step, wet_sum)
-    # Keep in (ni, nj, nk) = (x, y, z) order for internal consistency
+    # Keep the input (ni, nj, nk) = (z, y, x) array order.
     
     return wet_array
 
@@ -314,6 +319,11 @@ def _point_head_to_image(head_x, head_y, head_z, singa, cosga, sinta, costa):
     return xt, yt, zt
 
 
+def _round_like_cuda(value):
+    """Match CUDA ``roundf`` (halfway values round away from zero)."""
+    return jnp.where(value >= 0.0, jnp.floor(value + 0.5), jnp.ceil(value - 0.5))
+
+
 @partial(jax.jit, static_argnums=(0, 1, 2))
 def _smooth_wet_kernel(ni: int, nj: int, nk: int,
                        spacing: jnp.ndarray,
@@ -330,7 +340,7 @@ def _smooth_wet_kernel(ni: int, nj: int, nk: int,
     Samples 6 directions at 60° intervals, walking outward up to 
     min(10mm, center_wet*10) in each direction.
     """
-    # wet_array is (ni, nj, nk) = (x, y, z) order
+    # wet_array is (ni, nj, nk) = (z, y, x) array order.
     
     # Max distance to sample: min(center_wet * 10, 10) mm
     max_dr = jnp.minimum(wet_array * 10.0, 10.0)
@@ -341,7 +351,13 @@ def _smooth_wet_kernel(ni: int, nj: int, nk: int,
     n_distances = 10
     
     # Create arrays of angles and distances
-    angles = jnp.arange(n_directions) * (jnp.pi / 3.0)  # 0, 60, 120, 180, 240, 300 degrees
+    # Preserve CUDA's float32 operation order: ``i * CUDART_PI_F / 3``.
+    # Reassociating this as ``i * (pi / 3)`` changes the 300-degree values
+    # enough to select a different voxel when rounding a half-index.
+    angles = (
+        jnp.arange(n_directions, dtype=jnp.float32)
+        * jnp.asarray(jnp.pi, dtype=jnp.float32)
+    ) / jnp.float32(3.0)
     distances = jnp.arange(1, n_distances + 1, dtype=jnp.float32)  # 1, 2, ..., 10 mm
     
     # Create meshgrid of all angle/distance combinations: (n_directions, n_distances)
@@ -383,10 +399,10 @@ def _smooth_wet_kernel(ni: int, nj: int, nk: int,
             singa, cosga, sinta, costa
         )
         
-        # Convert to voxel indices: ijk = (xyz + iso) / spacing
-        new_i = jnp.round((new_img_x + iso_x) / spacing).astype(jnp.int32)
-        new_j = jnp.round((new_img_y + iso_y) / spacing).astype(jnp.int32)
-        new_k = jnp.round((new_img_z + iso_z) / spacing).astype(jnp.int32)
+        # Convert physical (x, y, z) back to array (z, y, x) indices.
+        new_i = _round_like_cuda((new_img_z + iso_z) / spacing).astype(jnp.int32)
+        new_j = _round_like_cuda((new_img_y + iso_y) / spacing).astype(jnp.int32)
+        new_k = _round_like_cuda((new_img_x + iso_x) / spacing).astype(jnp.int32)
         
         # Check bounds
         within_bounds = (new_i >= 0) & (new_i < ni) & \
@@ -536,9 +552,8 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
     # Apply valid mask
     dose_array = jnp.where(valid_mask, total_dose, 0.0)
     
-    # Transpose from (ni, nj, nk) = (x, y, z) to (nk, nj, ni) = (z, y, x) order
-    # This matches the output format expected by SimpleITK/NRRD
-    return dose_array.transpose(2, 1, 0)
+    # Preserve the input array's (z, y, x) shape.
+    return dose_array
 
 
 # =============================================================================
@@ -596,6 +611,8 @@ def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
         beam_params.iso_x, beam_params.iso_y, beam_params.iso_z
     )
     
+    # Preserve CUDA's -0.05 cm initialization for rays that never encounter
+    # material.  The downstream dose interpolation handles those values.
     return smoothed_wet
 
 
@@ -616,7 +633,7 @@ def compute_dose(beam_params: BeamParams, dose_params: DoseParams,
         grids: Optional precomputed grids (if None, will be computed)
         
     Returns:
-        Dose array (3D, shape nk x nj x ni in z,y,x order for NRRD)
+        Dose array with shape ``(ni, nj, nk)``, corresponding to ``(z, y, x)``
     """
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
     n_layers = layer_data.n_layers
@@ -632,12 +649,12 @@ def compute_dose(beam_params: BeamParams, dose_params: DoseParams,
             beam_params.sinta, beam_params.costa
         )
     
-    # Initialize dose accumulator (in output z,y,x order)
-    dose_array = jnp.zeros((nk, nj, ni), dtype=jnp.float32)
+    # All arrays retain the input (z, y, x) shape.
+    dose_array = jnp.zeros((ni, nj, nk), dtype=jnp.float32)
     
     # Process each layer with Python loop
     for layer_id in range(n_layers):
-        energy_id = int(layer_data.layers_energy_id[layer_id])
+        energy_id = layer_data.layers_energy_id[layer_id]
         r80 = layer_data.layers_r80[layer_id]
         
         # Get divergence coefficients
@@ -652,8 +669,8 @@ def compute_dose(beam_params: BeamParams, dose_params: DoseParams,
         idds = lut_data.lut_idds[energy_id]
         
         # Get spots for this layer
-        spot_start = int(layer_data.layers_spot_start[layer_id])
-        n_spots = int(layer_data.layers_n_spots[layer_id])
+        spot_start = layer_data.layers_spot_start[layer_id]
+        n_spots = layer_data.layers_n_spots[layer_id]
         spot_end = spot_start + n_spots
         
         spots_x = spot_data.spots_x[spot_start:spot_end]
@@ -701,7 +718,7 @@ def compute_impt_dose(beam_params: BeamParams, dose_params: DoseParams,
         layer_data: Energy layer data
         
     Returns:
-        Dose array (3D, shape nk x nj x ni in z,y,x order for NRRD)
+        Dose array with shape ``(ni, nj, nk)``, corresponding to ``(z, y, x)``
     """
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
     
@@ -848,9 +865,9 @@ def _extract_layer_data(spot_data: SpotData, beam_model) -> LayerData:
         spot_start += spot_count
     
     return LayerData(
-        layers_spot_start=jnp.array(layers_spot_start, dtype=jnp.int32),
-        layers_n_spots=jnp.array(layers_n_spots, dtype=jnp.int32),
-        layers_energy_id=jnp.array(layers_energy_id, dtype=jnp.int32),
+        layers_spot_start=tuple(layers_spot_start),
+        layers_n_spots=tuple(layers_n_spots),
+        layers_energy_id=tuple(layers_energy_id),
         layers_r80=jnp.array(layers_r80, dtype=jnp.float32),
         n_layers=len(layers_spot_start)
     )
@@ -874,6 +891,8 @@ def computeIMPTPlanJax(dose_grid, plan):
     Returns:
         3D numpy array of dose values (same shape as dose_grid.size)
     """
+    dose_grid._validate_geometry()
+
     # Check isotropic spacing
     if dose_grid.spacing[0] != dose_grid.spacing[1] or dose_grid.spacing[0] != dose_grid.spacing[2]:
         raise ValueError("Spacing must be isotropic for IMPT dose calculation")
@@ -890,8 +909,9 @@ def computeIMPTPlanJax(dose_grid, plan):
         spacing=jnp.array(float(dose_grid.spacing[0]), dtype=jnp.float32)
     )
     
-    # Output shape is (nk, nj, ni) = (z, y, x) for NRRD compatibility
-    output_shape = (dose_params.nk, dose_params.nj, dose_params.ni)
+    # DoseParams names are historical; these values are array dimensions 0/1/2,
+    # corresponding to physical z/y/x respectively.
+    output_shape = (dose_params.ni, dose_params.nj, dose_params.nk)
     total_dose = np.zeros(output_shape, dtype=np.float32)
     
     for beam in plan.beam_list:

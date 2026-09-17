@@ -25,6 +25,12 @@ dependencies = [
     "optax"
 ]
 
+[project.optional-dependencies]
+notebook = [
+    "ipykernel",
+    "ipywidgets",
+]
+
 keywords = ["radiation", "oncology", "medical", "proton", "cuda"]
 
 classifiers = [

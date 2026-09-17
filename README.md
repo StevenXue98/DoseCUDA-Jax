@@ -41,7 +41,38 @@ python tests/validate_cuda_jax_reference.py
 ```
 
 The validation runs both implementations in memory and does not overwrite the
-committed NRRD reference outputs.
+committed NRRD reference outputs. The CUDA golden is checked essentially
+bit-for-bit; the legacy JAX golden is retained as a bounded historical drift
+check because it was produced by the prototype with the indexing bugs fixed
+in the canonical implementation.
+
+For indexing and CUDA/JAX development, run the validation ladder from cheapest
+to most comprehensive:
+
+```bash
+python -m unittest tests/test_indexing_contract.py
+python tests/validate_noncubic_cuda_jax.py
+python tests/validate_cuda_jax_matrix.py
+python tests/validate_spot_weight_gradients.py
+python tests/validate_cuda_jax_reference.py
+python tests/test_head_and_neck.py
+```
+
+All six are read-only by default. The matrix covers both non-cubic axis
+orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
+gradient validation compares JAX autodiff with central finite differences and
+independent unit-spot dose responses.
+
+To generate a fresh non-cubic ring visualization and explore arbitrary slices:
+
+```bash
+python -m pip install ipykernel ipywidgets  # once per environment
+python tests/render_noncubic_comparison.py
+```
+
+Then open `tests/view_noncubic_indexing.ipynb` with the project `.venv` kernel.
+Generated NRRDs and PNGs are isolated under
+`test_phantom_output/noncubic_indexing/` and are not reference files.
 
 ## Prerequisites
 Before installing DoseCUDA, ensure you have the following dependencies installed:
@@ -186,14 +217,20 @@ For any questions or support regarding DoseCUDA, please reach out via email:
 
 Differentiable implementation of the PB algorithm in Jax.
 
+## Array and coordinate convention
+
+DoseCUDA uses the same convention as `SimpleITK.GetArrayFromImage`: CT, WET,
+mask, and dose arrays have shape `(z, y, x)`. Physical metadata (`origin`,
+`spacing`, and beam isocentres) is ordered `(x, y, z)`. `DoseGrid.size` is the
+NumPy array shape, so it is also `(z, y, x)`. Do not transpose a SimpleITK
+array when loading it into a dose grid or before writing a result with
+`SimpleITK.GetImageFromArray`.
+
 ## Main Changes
 
 1. **JAX Algorithm Implementation**
    - New DoseCUDA/Jax folder containing the JAX-based pencil beam algorithm
-   - Core implementation in:
-     - cuda_classes_jax.py
-     - impt_classes_jax.py
-     - jax_impt.py
+   - Canonical implementation: `DoseCUDA/Jax/impt_jax.py`
 
 2. **Test Cases for Jax**
    - added test scripts for Jax in the folder tests:
@@ -206,7 +243,7 @@ Differentiable implementation of the PB algorithm in Jax.
       ```
       or 
       ```cmd
-      python tests\compare_cuda_jax_dose.py
+      python tests\validate_cuda_jax_matrix.py
       ```
 
 3. **Updated Dependencies**
