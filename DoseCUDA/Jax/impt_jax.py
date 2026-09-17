@@ -747,52 +747,66 @@ def compute_impt_dose(beam_params: BeamParams, dose_params: DoseParams,
 # Data extraction helpers (convert from legacy objects to pure data structures)
 # =============================================================================
 
+def beam_params_from_angles(gantry_angle, couch_angle, adjusted_iso,
+                            model_vsadx, model_vsady) -> BeamParams:
+    """Build beam geometry from traceable gantry and couch angles in degrees.
+
+    ``adjusted_iso`` is the physical isocenter after subtracting the dose-grid
+    origin, matching the coordinates consumed by the CUDA implementation.
+    Keeping this constructor independent of the legacy plan objects allows the
+    two angles to remain JAX values throughout optimization.
+    """
+    gantry_angle = jnp.asarray(gantry_angle, dtype=jnp.float32)
+    couch_angle = jnp.asarray(couch_angle, dtype=jnp.float32)
+    adjusted_iso = jnp.asarray(adjusted_iso, dtype=jnp.float32)
+    model_vsadx = jnp.asarray(model_vsadx, dtype=jnp.float32)
+    model_vsady = jnp.asarray(model_vsady, dtype=jnp.float32)
+
+    # CUDA adds 180 degrees before constructing the beam transform.
+    adjusted_gantry = jnp.mod(gantry_angle + jnp.float32(180.0),
+                              jnp.float32(360.0))
+    ga = jnp.deg2rad(adjusted_gantry)
+    ta = jnp.deg2rad(couch_angle)
+
+    singa = jnp.sin(ga)
+    cosga = jnp.cos(ga)
+    sinta = jnp.sin(ta)
+    costa = jnp.cos(ta)
+
+    src_dist = (model_vsadx + model_vsady) / jnp.float32(2.0)
+    xg = -src_dist * singa
+    yg = src_dist * cosga
+
+    return BeamParams(
+        iso_x=adjusted_iso[0],
+        iso_y=adjusted_iso[1],
+        iso_z=adjusted_iso[2],
+        src_x=xg * costa,
+        src_y=yg,
+        src_z=-xg * sinta,
+        singa=singa,
+        cosga=cosga,
+        sinta=sinta,
+        costa=costa,
+        model_vsadx=model_vsadx,
+        model_vsady=model_vsady,
+    )
+
+
 def _extract_beam_params(original_beam, beam_model, dose_grid_origin) -> BeamParams:
     """Extract beam parameters from original beam object into pure data structures."""
     # Adjust isocenter (CUDA does: adjusted_iso = iso - origin)
     adjusted_iso = [
         original_beam.iso[0] - dose_grid_origin[0],
         original_beam.iso[1] - dose_grid_origin[1],
-        original_beam.iso[2] - dose_grid_origin[2]
+        original_beam.iso[2] - dose_grid_origin[2],
     ]
-    
-    # Adjust gantry angle (CUDA adds 180 degrees)
-    adjusted_gantry = (float(original_beam.gantry_angle) + 180.0) % 360.0
-    couch_angle = float(original_beam.couch_angle)
-    
-    # Source distance is average of model parameters
-    src_dist = (float(beam_model.VSADX) + float(beam_model.VSADY)) / 2.0
-    
-    # Precompute trig functions
-    ga = jnp.deg2rad(adjusted_gantry)
-    ta = jnp.deg2rad(couch_angle)
-    
-    singa = jnp.sin(ga)
-    cosga = jnp.cos(ga)
-    sinta = jnp.sin(ta)
-    costa = jnp.cos(ta)
-    
-    # Compute source position
-    xg = -src_dist * singa
-    yg = src_dist * cosga
-    
-    xt = xg * costa
-    yt = yg
-    zt = -xg * sinta
-    
-    return BeamParams(
-        iso_x=jnp.array(adjusted_iso[0], dtype=jnp.float32),
-        iso_y=jnp.array(adjusted_iso[1], dtype=jnp.float32),
-        iso_z=jnp.array(adjusted_iso[2], dtype=jnp.float32),
-        src_x=xt,
-        src_y=yt,
-        src_z=zt,
-        singa=singa,
-        cosga=cosga,
-        sinta=sinta,
-        costa=costa,
-        model_vsadx=jnp.array(float(beam_model.VSADX), dtype=jnp.float32),
-        model_vsady=jnp.array(float(beam_model.VSADY), dtype=jnp.float32)
+    return beam_params_from_angles(
+        original_beam.gantry_angle,
+        original_beam.couch_angle,
+        adjusted_iso,
+        beam_model.VSADX,
+        beam_model.VSADY,
     )
 
 
