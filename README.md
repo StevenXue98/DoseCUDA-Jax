@@ -57,11 +57,12 @@ python tests/validate_spot_weight_gradients.py
 python tests/validate_spot_position_gradients.py
 python tests/validate_frozen_wet_angle_gradients.py
 python tests/diagnose_full_angle_gradients.py
+python tests/diagnose_angle_gradient_matrix.py
 python tests/validate_cuda_jax_reference.py
 python tests/test_head_and_neck.py
 ```
 
-All nine are read-only by default. The matrix covers both non-cubic axis
+All ten are read-only by default. The CUDA/JAX matrix covers both non-cubic axis
 orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
 gradient validations compare JAX autodiff with central finite differences.
 The weight test also checks independent unit-spot dose responses. The position
@@ -70,7 +71,22 @@ pencil-beam path. The angle test rebuilds beam geometry from traceable gantry
 and couch angles but holds WET fixed. The full-angle diagnostic additionally
 recomputes ray tracing and WET smoothing. It validates the final-dose gradient
 while reporting, but not hiding, the discontinuous derivative introduced by
-rounded voxel selection during WET smoothing.
+rounded voxel selection during WET smoothing. The angle-gradient matrix repeats
+that diagnostic at four beam orientations in homogeneous and heterogeneous
+phantoms, including target and OAR-style dose objectives.
+
+To map the CUDA-compatible smoother's local BAO loss landscape and compare
+autodiff slopes with dense forward evaluations:
+
+```bash
+python tests/diagnose_rounded_wet_landscape.py
+```
+
+CSV data and plots are written under the ignored
+`test_phantom_output/angular_landscape/` directory. This diagnostic varies
+gantry and couch angles independently around representative smooth and
+discontinuous cases; its target/OAR masks, prescription, spots, and weights
+remain fixed within each scan.
 
 To generate a fresh non-cubic ring visualization and explore arbitrary slices:
 

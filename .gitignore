@@ -10,6 +10,7 @@ __pycache__/
 test_phantom_output/optimization/
 test_phantom_output/native_gtx1080ti/
 test_phantom_output/noncubic_indexing/
+test_phantom_output/angular_landscape/
 
 # Distribution / packaging
 *.egg-info/
