@@ -1,4 +1,4 @@
-"""Map local BAO loss landscapes produced by rounded WET smoothing.
+"""Map local BAO loss landscapes produced by either WET smoother.
 
 The target/OAR masks, prescription, spot parameters, and material volume are
 fixed within each scan.  Only one beam angle varies.  Dense forward samples
@@ -30,6 +30,8 @@ from impt_jax import (  # noqa: E402
     beam_params_from_angles,
     compute_dose,
     compute_raytrace,
+    compute_raytrace_differentiable,
+    compute_raytrace_surrogate,
 )
 from validate_spot_weight_gradients import (  # noqa: E402
     SHAPE_ZYX,
@@ -48,11 +50,24 @@ SCAN_HALF_WIDTH_DEG = 0.5
 SCAN_STEP_DEG = 0.01
 GRADIENT_SPACING_DEG = 0.05
 FINITE_DIFFERENCE_HALF_STEP_DEG = 0.05
+FINITE_DIFFERENCE_HALF_STEPS_DEG = (0.01, 0.05, 0.10, 0.25)
 DESCENT_STEPS_DEG = (0.01, 0.05, 0.10, 0.25)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--smoother",
+        choices=("rounded", "differentiable", "surrogate"),
+        default="rounded",
+        help="WET smoother to diagnose (default: rounded).",
+    )
+    parser.add_argument(
+        "--transition-width-mm",
+        type=float,
+        default=0.25,
+        help="Sigmoid width used by the differentiable smoother.",
+    )
     parser.add_argument(
         "--output-dir",
         default=os.path.join(
@@ -152,46 +167,102 @@ def scan_metrics(losses, gradient_indices, autodiff, finite_difference):
     }
 
 
+def multiscale_gradient_metrics(
+    losses, gradient_indices, autodiff, finite_differences
+):
+    results = {}
+    for half_step, finite_difference in finite_differences.items():
+        valid = np.isfinite(finite_difference)
+        selected_autodiff = autodiff[valid]
+        selected_finite_difference = finite_difference[valid]
+        difference = selected_autodiff - selected_finite_difference
+        relative_l2 = float(
+            np.linalg.norm(difference)
+            / max(np.linalg.norm(selected_autodiff), 1.0e-12)
+        )
+        gradient_floor = 0.05 * max(
+            float(np.max(np.abs(selected_autodiff))), 1.0e-12
+        )
+        active = (np.abs(selected_autodiff) > gradient_floor) & (
+            np.abs(selected_finite_difference) > gradient_floor
+        )
+        sign_mismatches = int(
+            np.count_nonzero(
+                active
+                & (
+                    np.sign(selected_autodiff)
+                    != np.sign(selected_finite_difference)
+                )
+            )
+        )
+        results[half_step] = {
+            "relative_l2": relative_l2,
+            "sign_mismatches": sign_mismatches,
+            "active_gradients": int(np.count_nonzero(active)),
+            "samples": int(np.count_nonzero(valid)),
+        }
+    return results
+
+
 def write_outputs(
     output_dir,
+    smoother_label,
     case_name,
     angle_name,
     varied_angles,
     losses,
     gradient_indices,
     autodiff,
-    finite_difference,
+    finite_differences,
 ):
-    stem = f"{case_name.replace('/', '_')}_{angle_name}"
+    stem = f"{smoother_label}_{case_name.replace('/', '_')}_{angle_name}"
     csv_path = os.path.join(output_dir, f"{stem}.csv")
     png_path = os.path.join(output_dir, f"{stem}.png")
 
     autodiff_dense = np.full(losses.shape, np.nan, dtype=np.float64)
-    finite_difference_dense = np.full(losses.shape, np.nan, dtype=np.float64)
     autodiff_dense[gradient_indices] = autodiff
-    finite_difference_dense[gradient_indices] = finite_difference
+    finite_difference_dense = {}
+    for half_step, finite_difference in finite_differences.items():
+        dense = np.full(losses.shape, np.nan, dtype=np.float64)
+        dense[gradient_indices] = finite_difference
+        finite_difference_dense[half_step] = dense
     with open(csv_path, "w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
-        writer.writerow(
-            ("angle_degrees", "loss", "autodiff", "finite_difference")
-        )
+        writer.writerow((
+            "angle_degrees",
+            "loss",
+            "autodiff",
+            *(
+                f"finite_difference_h_{half_step:g}_deg"
+                for half_step in finite_differences
+            ),
+        ))
         writer.writerows(
-            zip(varied_angles, losses, autodiff_dense, finite_difference_dense)
+            zip(
+                varied_angles,
+                losses,
+                autodiff_dense,
+                *(finite_difference_dense.values()),
+            )
         )
 
     figure, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
     axes[0].plot(varied_angles, losses, linewidth=1.2)
     axes[0].set_ylabel("BAO-style loss")
-    axes[0].set_title(f"Rounded WET: {case_name}, varying {angle_name}")
+    axes[0].set_title(
+        f"{smoother_label.replace('_', ' ').title()}: "
+        f"{case_name}, varying {angle_name}"
+    )
     axes[0].grid(alpha=0.25)
 
-    axes[1].plot(
-        varied_angles[gradient_indices],
-        finite_difference,
-        "o-",
-        markersize=3,
-        label=f"central difference (h={FINITE_DIFFERENCE_HALF_STEP_DEG:g}°)",
-    )
+    for half_step, finite_difference in finite_differences.items():
+        axes[1].plot(
+            varied_angles[gradient_indices],
+            finite_difference,
+            "o-",
+            markersize=2.5,
+            label=f"central difference (h={half_step:g}°)",
+        )
     axes[1].plot(
         varied_angles[gradient_indices],
         autodiff,
@@ -211,7 +282,43 @@ def write_outputs(
 
 def main():
     args = parse_args()
+    if args.transition_width_mm <= 0.0:
+        raise SystemExit("--transition-width-mm must be positive")
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.smoother == "rounded":
+        smoother_label = "rounded_wet"
+
+        def raytrace(beam_params, dose_params, density, grids):
+            return compute_raytrace(beam_params, dose_params, density, grids)
+    elif args.smoother == "differentiable":
+        smoother_label = (
+            f"differentiable_wet_{args.transition_width_mm:g}mm"
+            .replace(".", "p")
+        )
+
+        def raytrace(beam_params, dose_params, density, grids):
+            return compute_raytrace_differentiable(
+                beam_params,
+                dose_params,
+                density,
+                grids,
+                transition_width_mm=args.transition_width_mm,
+            )
+    else:
+        smoother_label = (
+            f"rounded_forward_surrogate_backward_"
+            f"{args.transition_width_mm:g}mm"
+        ).replace(".", "p")
+
+        def raytrace(beam_params, dose_params, density, grids):
+            return compute_raytrace_surrogate(
+                beam_params,
+                dose_params,
+                density,
+                grids,
+                transition_width_mm=args.transition_width_mm,
+            )
 
     (
         baseline_beam_params,
@@ -257,7 +364,7 @@ def main():
             beam_params.sinta,
             beam_params.costa,
         )
-        wet = compute_raytrace(beam_params, dose_params, density, grids)
+        wet = raytrace(beam_params, dose_params, density, grids)
         return compute_dose(
             beam_params,
             dose_params,
@@ -315,6 +422,7 @@ def main():
     all_results = []
 
     print(f"JAX device: {jax.devices()[0]}")
+    print(f"WET smoother: {smoother_label}")
     print(f"shape (z,y,x): {SHAPE_ZYX}")
     print(
         f"scan: +/-{SCAN_HALF_WIDTH_DEG:g} deg at {SCAN_STEP_DEG:g} deg; "
@@ -341,22 +449,40 @@ def main():
                 gradient_batch, density, target_rx
             )
             autodiff = np.asarray(gradients, dtype=np.float64)[:, angle_index]
-            finite_difference = (
-                losses[gradient_indices + finite_difference_radius]
-                - losses[gradient_indices - finite_difference_radius]
-            ) / (2.0 * FINITE_DIFFERENCE_HALF_STEP_DEG)
+            finite_differences = {}
+            for half_step in FINITE_DIFFERENCE_HALF_STEPS_DEG:
+                radius = int(round(half_step / SCAN_STEP_DEG))
+                valid = (gradient_indices - radius >= 0) & (
+                    gradient_indices + radius < losses.size
+                )
+                values = np.full(gradient_indices.shape, np.nan, dtype=np.float64)
+                values[valid] = (
+                    losses[gradient_indices[valid] + radius]
+                    - losses[gradient_indices[valid] - radius]
+                ) / (2.0 * half_step)
+                finite_differences[half_step] = values
+            finite_difference = finite_differences[
+                FINITE_DIFFERENCE_HALF_STEP_DEG
+            ]
             metrics = scan_metrics(
                 losses, gradient_indices, autodiff, finite_difference
             )
+            multiscale_metrics = multiscale_gradient_metrics(
+                losses,
+                gradient_indices,
+                autodiff,
+                finite_differences,
+            )
             csv_path, png_path = write_outputs(
                 args.output_dir,
+                smoother_label,
                 case_name,
                 angle_name,
                 varied_angles,
                 losses,
                 gradient_indices,
                 autodiff,
-                finite_difference,
+                finite_differences,
             )
             all_results.append((case_name, angle_name, metrics))
 
@@ -366,6 +492,16 @@ def main():
                 f"max-scaled={100.0 * metrics['max_scaled_error']:.3f}% "
                 f"sign={metrics['sign_mismatches']}/{metrics['active_gradients']} "
                 f"slope-jump={metrics['max_normalized_slope_jump']:.3f}"
+            )
+            print(
+                "  rounded finite differences: "
+                + "; ".join(
+                    f"h={half_step:g} deg "
+                    f"L2={100.0 * scale_metrics['relative_l2']:.2f}% "
+                    f"sign={scale_metrics['sign_mismatches']}/"
+                    f"{scale_metrics['active_gradients']}"
+                    for half_step, scale_metrics in multiscale_metrics.items()
+                )
             )
             for step, descent in metrics["descent"].items():
                 print(
@@ -380,9 +516,9 @@ def main():
         not np.isfinite(metrics["relative_l2"])
         for _case, _angle, metrics in all_results
     ):
-        raise SystemExit("Rounded-WET landscape diagnostic produced non-finite metrics")
+        raise SystemExit("WET landscape diagnostic produced non-finite metrics")
 
-    print("Rounded-WET angular landscape diagnostic completed.")
+    print(f"{smoother_label} angular landscape diagnostic completed.")
 
 
 if __name__ == "__main__":

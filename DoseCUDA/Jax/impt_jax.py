@@ -438,6 +438,121 @@ def _smooth_wet_kernel(ni: int, nj: int, nk: int,
     return wet_sum / n_voxels
 
 
+@partial(jax.jit, static_argnums=(0, 1, 2))
+def _smooth_wet_kernel_differentiable(
+    ni: int,
+    nj: int,
+    nk: int,
+    spacing: jnp.ndarray,
+    wet_array: jnp.ndarray,
+    vox_head_x: jnp.ndarray,
+    vox_head_y: jnp.ndarray,
+    vox_head_z: jnp.ndarray,
+    singa: jnp.ndarray,
+    cosga: jnp.ndarray,
+    sinta: jnp.ndarray,
+    costa: jnp.ndarray,
+    iso_x: jnp.ndarray,
+    iso_y: jnp.ndarray,
+    iso_z: jnp.ndarray,
+    transition_width_mm: jnp.ndarray,
+) -> jnp.ndarray:
+    """Smooth WET with continuous sampling and a soft radial cutoff.
+
+    This is an opt-in BAO model. It uses the same six lateral directions and
+    1--10 mm sample radii as the CUDA-compatible smoother, but replaces voxel
+    rounding with trilinear interpolation and ``dr < max_dr`` with a sigmoid
+    weight. The center voxel retains unit weight.
+    """
+    max_dr = jnp.minimum(wet_array * 10.0, 10.0)
+
+    angles = (
+        jnp.arange(6, dtype=jnp.float32)
+        * jnp.asarray(jnp.pi, dtype=jnp.float32)
+    ) / jnp.float32(3.0)
+    distances = jnp.arange(1, 11, dtype=jnp.float32)
+    angle_grid, dist_grid = jnp.meshgrid(angles, distances, indexing="ij")
+    all_angles = angle_grid.flatten()
+    all_dists = dist_grid.flatten()
+    cos_angles = jnp.cos(all_angles)
+    sin_angles = jnp.sin(all_angles)
+
+    weighted_wet_sum = wet_array
+    weight_sum = jnp.ones_like(wet_array)
+
+    def process_sample(carry, sample_idx):
+        weighted_wet_sum, weight_sum = carry
+
+        dr = all_dists[sample_idx]
+        new_img_x, new_img_y, new_img_z = _point_head_to_image(
+            vox_head_x + dr * cos_angles[sample_idx],
+            vox_head_y + dr * sin_angles[sample_idx],
+            vox_head_z,
+            singa,
+            cosga,
+            sinta,
+            costa,
+        )
+
+        # Keep continuous array coordinates so angle derivatives flow through
+        # both the coordinate transform and trilinear interpolation.
+        new_i = (new_img_z + iso_z) / spacing
+        new_j = (new_img_y + iso_y) / spacing
+        new_k = (new_img_x + iso_x) / spacing
+
+        # Match the rounded model's half-voxel physical support. Clipping
+        # makes interpolation safe; the mask removes samples beyond it.
+        within_bounds = (
+            (new_i >= -0.5)
+            & (new_i < ni - 0.5)
+            & (new_j >= -0.5)
+            & (new_j < nj - 0.5)
+            & (new_k >= -0.5)
+            & (new_k < nk - 0.5)
+        )
+        coordinates = jnp.stack(
+            (
+                jnp.clip(new_i, 0.0, ni - 1.0),
+                jnp.clip(new_j, 0.0, nj - 1.0),
+                jnp.clip(new_k, 0.0, nk - 1.0),
+            ),
+            axis=0,
+        )
+        neighbor_wet = map_coordinates(
+            wet_array, coordinates, order=1, mode="nearest"
+        )
+
+        radial_weight = jax.nn.sigmoid(
+            (max_dr - dr) / transition_width_mm
+        )
+        sample_weight = jnp.where(within_bounds, radial_weight, 0.0)
+        weighted_wet_sum = weighted_wet_sum + sample_weight * neighbor_wet
+        weight_sum = weight_sum + sample_weight
+        return (weighted_wet_sum, weight_sum), None
+
+    (weighted_wet_sum, weight_sum), _ = lax.scan(
+        process_sample,
+        (weighted_wet_sum, weight_sum),
+        jnp.arange(all_dists.size),
+    )
+    return weighted_wet_sum / weight_sum
+
+
+@jax.custom_jvp
+def _with_surrogate_gradient(
+    exact_value: jnp.ndarray, surrogate_value: jnp.ndarray
+) -> jnp.ndarray:
+    """Return ``exact_value`` while differentiating as ``surrogate_value``."""
+    return exact_value
+
+
+@_with_surrogate_gradient.defjvp
+def _with_surrogate_gradient_jvp(primals, tangents):
+    exact_value, _surrogate_value = primals
+    _exact_tangent, surrogate_tangent = tangents
+    return exact_value, surrogate_tangent
+
+
 # =============================================================================
 # Pencil beam kernel
 # =============================================================================
@@ -568,26 +683,12 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
 # High-level computation functions
 # =============================================================================
 
-def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
-                          density_array: jnp.ndarray,
-                          grids: PrecomputedGrids) -> jnp.ndarray:
-    """
-    Compute WET using ray tracing with lateral smoothing - pure functional interface.
-    
-    Args:
-        beam_params: Beam geometry parameters
-        dose_params: Dose grid parameters  
-        density_array: Density array (3D, shape ni x nj x nk)
-        grids: Precomputed voxel grids
-        
-    Returns:
-        Smoothed WET array (3D, shape ni x nj x nk)
-    """
+def _compute_raw_wet(beam_params: BeamParams, dose_params: DoseParams,
+                     density_array: jnp.ndarray,
+                     grids: PrecomputedGrids) -> jnp.ndarray:
+    """Ray trace WET before applying either lateral smoothing model."""
     ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
-    
-    # density_array is already 3D
-    density_3d = density_array
-    
+
     # Calculate max steps (ensure we use Python floats to avoid JAX array)
     spacing_val = float(dose_params.spacing)
     # This is a static loop bound, not a differentiable calculation.  Keep it
@@ -602,15 +703,25 @@ def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
     max_dist = float(np.sqrt(np.float32(grid_diagonal_squared))) + 500.0
     max_steps = int(max_dist) + 10
     
-    # Step 1: Ray trace to get raw WET
-    raw_wet = _raytrace_kernel(
+    return _raytrace_kernel(
         ni, nj, nk,
         dose_params.spacing,
         beam_params.iso_x, beam_params.iso_y, beam_params.iso_z,
         max_steps,
-        density_3d,
+        density_array,
         grids.vox_xyz_x, grids.vox_xyz_y, grids.vox_xyz_z,
         grids.uvec_x, grids.uvec_y, grids.uvec_z
+    )
+
+
+def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
+                     density_array: jnp.ndarray,
+                     grids: PrecomputedGrids) -> jnp.ndarray:
+    """Compute WET with the CUDA-compatible rounded lateral smoother."""
+    ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
+
+    raw_wet = _compute_raw_wet(
+        beam_params, dose_params, density_array, grids
     )
     
     # Step 2: Apply lateral smoothing (accounts for proton scattering)
@@ -627,6 +738,105 @@ def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
     # Preserve CUDA's -0.05 cm initialization for rays that never encounter
     # material.  The downstream dose interpolation handles those values.
     return smoothed_wet
+
+
+def compute_raytrace_differentiable(
+    beam_params: BeamParams,
+    dose_params: DoseParams,
+    density_array: jnp.ndarray,
+    grids: PrecomputedGrids,
+    transition_width_mm: float = 0.25,
+) -> jnp.ndarray:
+    """Compute WET with the opt-in differentiable lateral smoother.
+
+    ``transition_width_mm`` controls the sigmoid approximation to the rounded
+    smoother's hard radial cutoff. The CUDA-compatible path remains
+    :func:`compute_raytrace`.
+    """
+    ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
+    transition_width_mm = jnp.asarray(
+        transition_width_mm, dtype=jnp.float32
+    )
+    raw_wet = _compute_raw_wet(
+        beam_params, dose_params, density_array, grids
+    )
+    return _smooth_wet_kernel_differentiable(
+        ni,
+        nj,
+        nk,
+        dose_params.spacing,
+        raw_wet,
+        grids.vox_head_x,
+        grids.vox_head_y,
+        grids.vox_head_z,
+        beam_params.singa,
+        beam_params.cosga,
+        beam_params.sinta,
+        beam_params.costa,
+        beam_params.iso_x,
+        beam_params.iso_y,
+        beam_params.iso_z,
+        transition_width_mm,
+    )
+
+
+def compute_raytrace_surrogate(
+    beam_params: BeamParams,
+    dose_params: DoseParams,
+    density_array: jnp.ndarray,
+    grids: PrecomputedGrids,
+    transition_width_mm: float = 0.25,
+) -> jnp.ndarray:
+    """Return rounded WET with the differentiable smoother's backward rule.
+
+    The primal value is exactly the CUDA-compatible rounded WET. Derivatives
+    through the WET boundary are deliberately replaced by derivatives of the
+    trilinear/sigmoid smoother. This is a surrogate optimization direction,
+    not the mathematical derivative of the returned forward model.
+    """
+    ni, nj, nk = dose_params.ni, dose_params.nj, dose_params.nk
+    transition_width_mm = jnp.asarray(
+        transition_width_mm, dtype=jnp.float32
+    )
+    raw_wet = _compute_raw_wet(
+        beam_params, dose_params, density_array, grids
+    )
+    rounded_wet = _smooth_wet_kernel(
+        ni,
+        nj,
+        nk,
+        dose_params.spacing,
+        raw_wet,
+        grids.vox_head_x,
+        grids.vox_head_y,
+        grids.vox_head_z,
+        beam_params.singa,
+        beam_params.cosga,
+        beam_params.sinta,
+        beam_params.costa,
+        beam_params.iso_x,
+        beam_params.iso_y,
+        beam_params.iso_z,
+    )
+    differentiable_wet = _smooth_wet_kernel_differentiable(
+        ni,
+        nj,
+        nk,
+        dose_params.spacing,
+        raw_wet,
+        grids.vox_head_x,
+        grids.vox_head_y,
+        grids.vox_head_z,
+        beam_params.singa,
+        beam_params.cosga,
+        beam_params.sinta,
+        beam_params.costa,
+        beam_params.iso_x,
+        beam_params.iso_y,
+        beam_params.iso_z,
+        transition_width_mm,
+    )
+    return _with_surrogate_gradient(rounded_wet, differentiable_wet)
 
 
 def compute_dose(beam_params: BeamParams, dose_params: DoseParams,

@@ -58,11 +58,12 @@ python tests/validate_spot_position_gradients.py
 python tests/validate_frozen_wet_angle_gradients.py
 python tests/diagnose_full_angle_gradients.py
 python tests/diagnose_angle_gradient_matrix.py
+python tests/validate_wet_surrogate.py
 python tests/validate_cuda_jax_reference.py
 python tests/test_head_and_neck.py
 ```
 
-All ten are read-only by default. The CUDA/JAX matrix covers both non-cubic axis
+All eleven are read-only by default. The CUDA/JAX matrix covers both non-cubic axis
 orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
 gradient validations compare JAX autodiff with central finite differences.
 The weight test also checks independent unit-spot dose responses. The position
@@ -79,7 +80,7 @@ To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
 ```bash
-python tests/diagnose_rounded_wet_landscape.py
+python tests/diagnose_rounded_wet_landscape.py --smoother rounded
 ```
 
 CSV data and plots are written under the ignored
@@ -87,6 +88,43 @@ CSV data and plots are written under the ignored
 gantry and couch angles independently around representative smooth and
 discontinuous cases; its target/OAR masks, prescription, spots, and weights
 remain fixed within each scan.
+
+An experimental BAO-specific WET smoother is available as a separate opt-in
+path. It replaces rounded lateral voxel lookup with trilinear interpolation
+and the hard radial cutoff with normalized sigmoid weights. The original
+`compute_raytrace` function remains the CUDA-compatible default; call
+`compute_raytrace_differentiable` explicitly to use the smooth model. Its
+sigmoid transition width defaults to 0.25 mm and is an experimental numerical
+parameter, not a calibrated machine parameter.
+
+Compare its forward WET and dose with the rounded reference, then run the same
+dense angular landscape diagnostic:
+
+```bash
+python tests/compare_wet_smoothers.py
+python tests/diagnose_rounded_wet_landscape.py \
+  --smoother differentiable --transition-width-mm 0.25
+```
+
+The smooth model intentionally does not reproduce CUDA exactly. The comparison
+script reports that modeling drift separately from the CUDA/JAX regression
+tests, so CUDA parity and BAO gradient behavior are not conflated.
+
+A third experimental mode keeps the rounded forward WET and dose exactly while
+substituting the differentiable smoother only at the WET backward boundary:
+
+```bash
+python tests/validate_wet_surrogate.py
+python tests/diagnose_rounded_wet_landscape.py \
+  --smoother surrogate --transition-width-mm 0.25
+```
+
+Call `compute_raytrace_surrogate` to select this behavior. Its custom gradient
+is deliberately not the mathematical derivative of its returned rounded
+forward values; it is an optimization heuristic that must be assessed by
+recomputed rounded-loss descent. The validation checks that forward WET and
+dose remain exactly equal to `compute_raytrace` and that the substituted WET
+gradient equals `compute_raytrace_differentiable`.
 
 To generate a fresh non-cubic ring visualization and explore arbitrary slices:
 
