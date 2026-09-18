@@ -114,7 +114,11 @@ def _interpolate_lut(wet: jnp.ndarray, lut_len: int,
     i_hi = jnp.clip(i, 0, lut_len - 1)
     
     denom = depths[i_hi] - depths[i_lo]
-    factor = jnp.where(denom > 0, (wet - depths[i_lo]) / denom, 0.0)
+    valid_interval = denom > 0
+    safe_denom = jnp.where(valid_interval, denom, 1.0)
+    factor = jnp.where(
+        valid_interval, (wet - depths[i_lo]) / safe_denom, 0.0
+    )
     
     idd_interp = idds[i_lo] + factor * (idds[i_hi] - idds[i_lo])
     sigma_interp = sigmas[i_lo] + factor * (sigmas[i_hi] - sigmas[i_lo])
@@ -471,7 +475,11 @@ def _pencil_beam_single_layer(ni: int, nj: int, nk: int, lut_len: int,
     i_lo = jnp.clip(i - 1, 0, lut_len - 1)
     i_hi = jnp.clip(i, 0, lut_len - 1)
     denom = depths[i_hi] - depths[i_lo]
-    factor = jnp.where(denom > 0, (wet - depths[i_lo]) / denom, 0.0)
+    valid_interval = denom > 0
+    safe_denom = jnp.where(valid_interval, denom, 1.0)
+    factor = jnp.where(
+        valid_interval, (wet - depths[i_lo]) / safe_denom, 0.0
+    )
     idd_interp = idds[i_lo] + factor * (idds[i_hi] - idds[i_lo])
     sigma_ms_interp = sigmas[i_lo] + factor * (sigmas[i_hi] - sigmas[i_lo])
     idd = jnp.where(at_end, idds[-1], jnp.where(at_start, idds[0], idd_interp))
@@ -582,11 +590,16 @@ def compute_raytrace(beam_params: BeamParams, dose_params: DoseParams,
     
     # Calculate max steps (ensure we use Python floats to avoid JAX array)
     spacing_val = float(dose_params.spacing)
-    max_dist = float(jnp.sqrt(
-        (ni * spacing_val)**2 + 
-        (nj * spacing_val)**2 + 
-        (nk * spacing_val)**2
-    )) + 500.0
+    # This is a static loop bound, not a differentiable calculation.  Keep it
+    # on the host so an enclosing angle transform does not attempt to convert
+    # the result of ``jnp.sqrt`` from a tracer to a Python float.  Explicit
+    # float32 rounding preserves the operation used by the original JAX path.
+    grid_diagonal_squared = (
+        (ni * spacing_val) ** 2
+        + (nj * spacing_val) ** 2
+        + (nk * spacing_val) ** 2
+    )
+    max_dist = float(np.sqrt(np.float32(grid_diagonal_squared))) + 500.0
     max_steps = int(max_dist) + 10
     
     # Step 1: Ray trace to get raw WET

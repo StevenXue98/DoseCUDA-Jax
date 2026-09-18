@@ -56,18 +56,21 @@ python tests/validate_cuda_jax_matrix.py
 python tests/validate_spot_weight_gradients.py
 python tests/validate_spot_position_gradients.py
 python tests/validate_frozen_wet_angle_gradients.py
+python tests/diagnose_full_angle_gradients.py
 python tests/validate_cuda_jax_reference.py
 python tests/test_head_and_neck.py
 ```
 
-All eight are read-only by default. The matrix covers both non-cubic axis
+All nine are read-only by default. The matrix covers both non-cubic axis
 orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
 gradient validations compare JAX autodiff with central finite differences.
 The weight test also checks independent unit-spot dose responses. The position
 test holds WET and beam geometry fixed, so it validates the smooth lateral
 pencil-beam path. The angle test rebuilds beam geometry from traceable gantry
-and couch angles but holds WET fixed. Neither test claims differentiability
-through ray tracing or WET smoothing.
+and couch angles but holds WET fixed. The full-angle diagnostic additionally
+recomputes ray tracing and WET smoothing. It validates the final-dose gradient
+while reporting, but not hiding, the discontinuous derivative introduced by
+rounded voxel selection during WET smoothing.
 
 To generate a fresh non-cubic ring visualization and explore arbitrary slices:
 
