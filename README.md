@@ -263,7 +263,29 @@ ignored `test_phantom_output/bao_toy_two_beam_2deg/` directory, leaving the
 10° results untouched. An atomic `reference_checkpoint.json` is written
 every ten pairs; rerunning the same command resumes an interrupted scan.
 The minimum is a sampled-grid reference, not a continuous global-optimum
-certificate.
+certificate. Each grid point uses one inner solve. The comparison below found
+that alternative weight initializations can change the solved loss by several
+percent even when the existing projected-gradient criterion passes, so narrow
+peaks and the exact ranking of nearby grid points need additional checking.
+
+To compare nominal continuous two-angle searches on that saved map, run:
+
+```bash
+python tests/compare_toy_two_beam_outer_methods.py
+```
+
+This reuses the 2° grid without rebuilding it. Six common starts compare
+fixed-weight Gaussian directions (24 antithetic pairs, σ = 2°) with central
+finite differences of the fully re-optimized loss (steps of 2° and 4°).
+Every proposed move is accepted only after a fresh joint 90-weight solve
+lowers the original CUDA loss. All methods use the same per-start time ceiling;
+actual wall time and dose/inner-solve counts are reported because a search
+may stop early. Three differently initialized inner solves at four grid
+locations estimate optimizer variability, and each search endpoint is
+rechecked from two additional weight starts. Results and path/cost plots go
+to ignored `test_phantom_output/bao_toy_two_beam_outer_comparison_24pairs/`.
+The comparison is a nominal optimizer diagnostic, not SAM or a robustness
+result. Differences comparable to the repeat-solve spread are inconclusive.
 
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
