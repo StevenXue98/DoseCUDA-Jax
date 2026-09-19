@@ -929,6 +929,72 @@ static PyObject *proton_gpu_matrix_evaluate(PyObject *self, PyObject *args) {
 }
 
 
+static PyObject *proton_gpu_matrix_dose(PyObject *self, PyObject *args) {
+	PyObject *capsule, *weights_object;
+	if (!PyArg_ParseTuple(args, "OO", &capsule, &weights_object)) return NULL;
+	auto *context = static_cast<GPUInfluenceMatrix *>(
+		PyCapsule_GetPointer(capsule, GPU_MATRIX_CAPSULE_NAME));
+	if (!context) return NULL;
+	if (!PyArray_Check(weights_object)) {
+		PyErr_SetString(PyExc_TypeError, "weights must be a NumPy array");
+		return NULL;
+	}
+	auto *weights = reinterpret_cast<PyArrayObject *>(weights_object);
+	if (!pyarray_typecheck(weights, 1, NPY_DOUBLE)
+	    || !PyArray_IS_C_CONTIGUOUS(weights)
+	    || PyArray_DIM(weights, 0) != context->spot_count()) {
+		PyErr_SetString(PyExc_ValueError,
+			"weights must be contiguous float64 matching matrix spots");
+		return NULL;
+	}
+	npy_intp shape[1] = {context->voxel_count()};
+	PyObject *dose = PyArray_SimpleNew(1, shape, NPY_DOUBLE);
+	if (!dose) return NULL;
+	try {
+		context->dose_only(pyarray_as<double>(weights),
+			pyarray_as<double>(reinterpret_cast<PyArrayObject *>(dose)));
+		return dose;
+	} catch (std::runtime_error &error) {
+		PyErr_Format(PyExc_RuntimeError, "GPU matrix dose: %s", error.what());
+	}
+	Py_DECREF(dose);
+	return NULL;
+}
+
+
+static PyObject *proton_gpu_matrix_weight_vjp(PyObject *self, PyObject *args) {
+	PyObject *capsule, *adjoint_object;
+	if (!PyArg_ParseTuple(args, "OO", &capsule, &adjoint_object)) return NULL;
+	auto *context = static_cast<GPUInfluenceMatrix *>(
+		PyCapsule_GetPointer(capsule, GPU_MATRIX_CAPSULE_NAME));
+	if (!context) return NULL;
+	if (!PyArray_Check(adjoint_object)) {
+		PyErr_SetString(PyExc_TypeError, "adjoint must be a NumPy array");
+		return NULL;
+	}
+	auto *adjoint = reinterpret_cast<PyArrayObject *>(adjoint_object);
+	if (!pyarray_typecheck(adjoint, 1, NPY_DOUBLE)
+	    || !PyArray_IS_C_CONTIGUOUS(adjoint)
+	    || PyArray_DIM(adjoint, 0) != context->voxel_count()) {
+		PyErr_SetString(PyExc_ValueError,
+			"adjoint must be contiguous float64 matching matrix voxels");
+		return NULL;
+	}
+	npy_intp shape[1] = {context->spot_count()};
+	PyObject *gradient = PyArray_SimpleNew(1, shape, NPY_DOUBLE);
+	if (!gradient) return NULL;
+	try {
+		context->weight_vjp(pyarray_as<double>(adjoint),
+			pyarray_as<double>(reinterpret_cast<PyArrayObject *>(gradient)));
+		return gradient;
+	} catch (std::runtime_error &error) {
+		PyErr_Format(PyExc_RuntimeError, "GPU matrix VJP: %s", error.what());
+	}
+	Py_DECREF(gradient);
+	return NULL;
+}
+
+
 static PyObject * photon_dose(PyObject* self, PyObject* args) {
 
 	PyObject *model_instance, *volume_instance, *cp_instance;
@@ -1148,6 +1214,18 @@ static PyMethodDef DoseMethods[] = {
 		proton_gpu_matrix_evaluate,
 		METH_VARARGS,
 		"Compute dose objective and weight gradient using a resident GPU matrix."
+	},
+	{
+		"proton_gpu_matrix_dose",
+		proton_gpu_matrix_dose,
+		METH_VARARGS,
+		"Apply the resident GPU dose matrix to a weight vector."
+	},
+	{
+		"proton_gpu_matrix_weight_vjp",
+		proton_gpu_matrix_weight_vjp,
+		METH_VARARGS,
+		"Apply the transpose of the resident GPU dose matrix to an adjoint."
 	},
 	{
 		"photon_dose_cuda",

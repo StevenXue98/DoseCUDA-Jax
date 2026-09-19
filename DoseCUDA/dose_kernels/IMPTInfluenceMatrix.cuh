@@ -20,6 +20,8 @@ public:
     int voxel_count() const { return n_voxels_; }
     double value_and_gradient(const double *weights, double *gradient,
                               double *dose_host = nullptr);
+    void dose_only(const double *weights, double *dose_host);
+    void weight_vjp(const double *dose_adjoint, double *weight_gradient);
 
 private:
     struct Impl;

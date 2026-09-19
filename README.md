@@ -575,6 +575,24 @@ Its normalized target/brainstem/normal-tissue objective and spot layout are
 synthetic: this is a scaling test on patient anatomy, **not** a clinical-plan
 quality benchmark or a like-for-like comparison to matRad timing.
 
+## Coarse prostate nominal-plan experiment
+
+From the activated environment, run
+`python -m tests.run_prostate_nominal_plan`. This uses the checked-in matRad
+prostate CT and structures on a 5 mm grid, two fixed lateral fields,
+target-projected spots, and machine energy layers selected from target WET.
+The relative research objective includes the two PTV prescriptions and
+rectum, bladder, and remaining body penalties. Target voxels take priority
+over overlapping OAR voxels. It is **not** matRad's exact objective or a
+clinically calibrated plan. Only scored voxels are retained in the GPU
+influence matrix; the final dose and loss are independently recomputed by
+the original DoseCUDA forward model on the full grid. Runtime and matrix
+memory are capped. Scaled L-BFGS-B is the default inner solver; `--solver slsqp`
+allows a slower comparison. Results go to ignored
+`test_phantom_output/bao_prostate_nominal/summary.json` (with a matching `.npz`
+archive of optimized weights, spots, and full-grid dose). Coverage and OAR
+metrics must be inspected separately from numerical solver convergence.
+
 # JAX Implementation
 
 Differentiable implementation of the PB algorithm in Jax.

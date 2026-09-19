@@ -41,6 +41,14 @@ class GPUInfluenceMatrixTests(unittest.TestCase):
             np.testing.assert_allclose(
                 gpu_gradient, self.matrix.T @ dose_gradient.ravel(),
                 rtol=0, atol=1.0e-13)
+            np.testing.assert_allclose(
+                self.objective.weight_vjp(dose_gradient), gpu_gradient,
+                rtol=0, atol=1.0e-13)
+            modular_value, modular_gradient = (
+                self.objective.value_and_gradient_for(weights, self.cpu_loss))
+            self.assertAlmostEqual(modular_value, gpu_value, places=13)
+            np.testing.assert_allclose(modular_gradient, gpu_gradient,
+                                       rtol=0, atol=1.0e-13)
 
     def test_bounded_solver_matches_cpu(self):
         def cpu_callback(weights):

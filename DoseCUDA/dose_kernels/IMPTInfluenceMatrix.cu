@@ -165,3 +165,32 @@ double GPUInfluenceMatrix::value_and_gradient(
     }
     return objective;
 }
+
+void GPUInfluenceMatrix::dose_only(const double *weights, double *dose_host) {
+    CUDA_CHECK(cudaSetDevice(gpu_id_));
+    CUDA_CHECK(cudaMemcpy(impl_->weights->get(), weights,
+                          n_spots_ * sizeof(double), cudaMemcpyHostToDevice));
+    const double one = 1.0, zero = 0.0;
+    blas_check(cublasDgemv(impl_->blas.value, CUBLAS_OP_T,
+                           n_spots_, n_voxels_, &one, impl_->matrix->get(),
+                           n_spots_, impl_->weights->get(), 1, &zero,
+                           impl_->dose->get(), 1));
+    CUDA_CHECK(cudaMemcpy(dose_host, impl_->dose->get(),
+                          static_cast<size_t>(n_voxels_) * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+}
+
+void GPUInfluenceMatrix::weight_vjp(
+    const double *dose_adjoint, double *weight_gradient) {
+    CUDA_CHECK(cudaSetDevice(gpu_id_));
+    CUDA_CHECK(cudaMemcpy(impl_->adjoint->get(), dose_adjoint,
+                          static_cast<size_t>(n_voxels_) * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    const double one = 1.0, zero = 0.0;
+    blas_check(cublasDgemv(impl_->blas.value, CUBLAS_OP_N,
+                           n_spots_, n_voxels_, &one, impl_->matrix->get(),
+                           n_spots_, impl_->adjoint->get(), 1, &zero,
+                           impl_->gradient->get(), 1));
+    CUDA_CHECK(cudaMemcpy(weight_gradient, impl_->gradient->get(),
+                          n_spots_ * sizeof(double), cudaMemcpyDeviceToHost));
+}

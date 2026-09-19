@@ -20,6 +20,7 @@ test_phantom_output/bao_cuda_inner_benchmark/
 test_phantom_output/bao_cuda_inner_multistart/
 test_phantom_output/bao_gpu_influence/
 test_phantom_output/bao_patient_inner_scaling/
+test_phantom_output/bao_prostate_nominal/
 
 # Distribution / packaging
 *.egg-info/

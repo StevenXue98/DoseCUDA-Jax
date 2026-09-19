@@ -312,20 +312,33 @@ class InfluenceMatrixPlanDose:
     Beam geometry and each dose column still come from the original CUDA model.
     """
 
-    def __init__(self, fixed_plan: FixedGeometryPlanDose, *, max_elements=10_000_000):
-        shape = tuple(int(value) for value in fixed_plan.beams[0].dose_grid.size)
-        n_voxels = int(np.prod(shape))
+    def __init__(self, fixed_plan: FixedGeometryPlanDose, *, max_elements=10_000_000,
+                 row_mask=None):
+        full_shape = tuple(int(value) for value in fixed_plan.beams[0].dose_grid.size)
+        if row_mask is None:
+            selected = None
+            shape = full_shape
+            n_voxels = int(np.prod(shape))
+        else:
+            selected = np.asarray(row_mask, dtype=bool)
+            if selected.shape != full_shape or not np.any(selected):
+                raise ValueError("row_mask must be a nonempty dose-grid mask")
+            selected = selected.ravel()
+            n_voxels = int(selected.sum())
+            shape = (n_voxels,)
         self.n_spots = fixed_plan.n_spots
         if self.n_spots * n_voxels > max_elements:
             raise ValueError("influence matrix exceeds max_elements")
         self.shape = shape
+        self.row_mask = None if selected is None else selected.reshape(full_shape)
         original_weights = fixed_plan.weights
         matrix = np.empty((n_voxels, self.n_spots), dtype=np.float64)
         unit = np.zeros(self.n_spots, dtype=np.float32)
         try:
             for index in range(self.n_spots):
                 unit[index] = 1.0
-                matrix[:, index] = fixed_plan.dose(unit).ravel()
+                column = fixed_plan.dose(unit).ravel()
+                matrix[:, index] = column if selected is None else column[selected]
                 unit[index] = 0.0
         finally:
             fixed_plan.dose(original_weights)

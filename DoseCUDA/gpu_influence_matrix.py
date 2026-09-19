@@ -63,9 +63,25 @@ class GPUInfluenceMatrixObjective:
         return result["objective"], result["gradient"]
 
     def dose(self, weights):
-        result = dose_kernels.proton_gpu_matrix_evaluate(
-            self._context, self._weights(weights), True)
-        return result["dose"].reshape(self.shape)
+        return dose_kernels.proton_gpu_matrix_dose(
+            self._context, self._weights(weights)).reshape(self.shape)
+
+    def weight_vjp(self, dose_adjoint):
+        adjoint = np.asarray(dose_adjoint, dtype=np.float64)
+        if adjoint.shape != self.shape or not np.all(np.isfinite(adjoint)):
+            raise ValueError("dose adjoint must be finite and match the grid")
+        return dose_kernels.proton_gpu_matrix_weight_vjp(
+            self._context, np.ascontiguousarray(adjoint).ravel())
+
+    def value_and_gradient_for(self, weights, loss):
+        """Use an arbitrary CPU loss with GPU-resident D and D-transpose.
+
+        The dose and its adjoint cross the CPU/GPU boundary each callback;
+        this keeps multi-structure research losses modular at modest sizes.
+        """
+        dose = self.dose(weights)
+        value, dose_adjoint = loss(dose)
+        return float(value), self.weight_vjp(dose_adjoint)
 
 
 @dataclass(frozen=True)
