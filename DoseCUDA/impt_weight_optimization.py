@@ -19,6 +19,65 @@ LossAndDoseGradient = Callable[[np.ndarray], tuple[float, np.ndarray]]
 ValueAndWeightGradient = Callable[[np.ndarray], tuple[float, np.ndarray]]
 
 
+def make_target_oar_loss(
+    target_mask, prescription, oar_mask, oar_limit, oar_weight=1.0
+) -> LossAndDoseGradient:
+    """Create a dimensionless target-prescription/OAR-overdose objective.
+
+    Both terms are mean squared dose errors divided by ``prescription**2``.
+    The target term penalizes under- and over-dose; the OAR term penalizes only
+    dose above its limit. This is a research objective, not a clinical plan
+    acceptance criterion.
+    """
+    target_mask = np.asarray(target_mask)
+    oar_mask = np.asarray(oar_mask)
+    if target_mask.ndim != 3 or target_mask.shape != oar_mask.shape:
+        raise ValueError("target and OAR masks must have the same 3D shape")
+    for name, mask in (("target", target_mask), ("OAR", oar_mask)):
+        if not np.all((mask == 0) | (mask == 1)):
+            raise ValueError(f"{name} mask must contain only zeros and ones")
+        if not np.any(mask):
+            raise ValueError(f"{name} mask must not be empty")
+    if not np.isfinite(prescription) or prescription <= 0:
+        raise ValueError("prescription must be finite and positive")
+    if not np.isfinite(oar_limit) or oar_limit < 0:
+        raise ValueError("oar_limit must be finite and nonnegative")
+    if not np.isfinite(oar_weight) or oar_weight < 0:
+        raise ValueError("oar_weight must be finite and nonnegative")
+
+    target_mask = target_mask.astype(bool, copy=True)
+    oar_mask = oar_mask.astype(bool, copy=True)
+    prescription = float(prescription)
+    oar_limit = float(oar_limit)
+    oar_weight = float(oar_weight)
+    scale = prescription * prescription
+    target_count = int(np.count_nonzero(target_mask))
+    oar_count = int(np.count_nonzero(oar_mask))
+
+    def loss(dose: np.ndarray) -> tuple[float, np.ndarray]:
+        dose = np.asarray(dose, dtype=np.float32)
+        if dose.shape != target_mask.shape or not np.all(np.isfinite(dose)):
+            raise ValueError("dose must be finite and match the mask shape")
+
+        target_error = dose[target_mask] - prescription
+        oar_excess = np.maximum(dose[oar_mask] - oar_limit, 0.0)
+        value = (
+            np.sum(target_error * target_error, dtype=np.float64) / target_count
+            + oar_weight
+            * np.sum(oar_excess * oar_excess, dtype=np.float64)
+            / oar_count
+        ) / scale
+
+        dose_gradient = np.zeros(dose.shape, dtype=np.float32)
+        dose_gradient[target_mask] += 2.0 * target_error / (target_count * scale)
+        dose_gradient[oar_mask] += (
+            2.0 * oar_weight * oar_excess / (oar_count * scale)
+        )
+        return float(value), dose_gradient
+
+    return loss
+
+
 class FixedGeometryBeamDose:
     """One-beam CUDA dose operator with cached WET and a spot-weight VJP."""
 

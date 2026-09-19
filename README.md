@@ -80,6 +80,23 @@ smoothing. The angle-gradient matrix repeats that diagnostic at four beam
 orientations in homogeneous and heterogeneous phantoms, including target and
 OAR-style dose objectives.
 
+For the first CUDA target/OAR optimization experiment, use a squared target
+prescription error plus a squared OAR overdose penalty. The objective returns
+its voxel-dose gradient to the existing CUDA spot-weight VJP; no dose kernel
+or robust-scenario interface is needed. Run the CPU loss checks and the toy
+phantom's full-iteration CUDA validation/profile with:
+
+```bash
+python -m unittest tests/test_cuda_target_oar_loss.py
+python tests/profile_cuda_target_oar_optimization.py
+```
+
+The profile prints cached-WET setup, complete projected-gradient runtime,
+objective-evaluation count, and timings for dose, Python loss, and weight VJP.
+These timings include GPU execution and host transfers but do not separate
+them. The masks and dose limits are toy inputs, not a clinical prescription or
+validated treatment plan.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
