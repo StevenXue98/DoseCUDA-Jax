@@ -52,10 +52,12 @@ def make_joint_operator(angles, grid, plan, base_beam):
     return FixedGeometryPlanDose(grid, angle_plan)
 
 
-def solve_subset(angles, case):
+def solve_subset(angles, case, initial_weights=None):
     grid, plan, beam, body, target, oar, normal, loss = case
     operator = make_joint_operator(angles, grid, plan, beam)
-    initial = np.concatenate([member.weights for member in operator.beams])
+    initial = (np.concatenate([member.weights for member in operator.beams])
+               if initial_weights is None else
+               np.asarray(initial_weights, dtype=np.float32))
     started = perf_counter()
     result, restarts, evaluations = solve_weights(operator, loss, initial)
     seconds = perf_counter() - started

@@ -214,6 +214,25 @@ The experiment checks that adding an available beam does not worsen the
 optimized loss beyond float32 solver variation. These are fixed-angle toy
 plans, not a three-angle BAO search or a clinical treatment plan.
 
+For the coupled **two-angle outer search**, run:
+
+```bash
+python tests/run_toy_two_beam_bao.py
+```
+
+The script jointly optimizes 90 weights at each evaluated angle pair. Its
+10° diagnostic grid has 190 unique pairs after exchanging otherwise
+identical beams is accounted for. Three starts, none placed at the grid's
+observed best pair, use a two-component Gaussian fixed-weight direction;
+accepted moves must lower the original CUDA loss after a fresh joint weight
+solve. The search and grid have separate solve caches and call counts. A
+heatmap with search paths, grid CSV, detailed search history, and winning
+weights are saved under ignored `test_phantom_output/bao_toy_two_beam/`.
+To change search settings without rebuilding the grid, pass
+`--reuse-reference` (for example, with `--sigma 4`). The grid is coarse, not
+a global-optimum certificate; fixed-weight probes use the candidate beam
+layout and are not physical setup errors or SAM perturbations.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 

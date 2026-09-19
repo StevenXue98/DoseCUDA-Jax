@@ -15,6 +15,7 @@ test_phantom_output/optimized_gantry_scan/
 test_phantom_output/bao_toy_baseline/
 test_phantom_output/bao_toy_gaussian*/
 test_phantom_output/bao_toy_three_beam/
+test_phantom_output/bao_toy_two_beam/
 
 # Distribution / packaging
 *.egg-info/
