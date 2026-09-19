@@ -6,6 +6,7 @@ import numpy as np
 
 from DoseCUDA.impt_weight_optimization import (
     bounded_lbfgsb,
+    bounded_slsqp,
     make_target_oar_loss,
     make_target_oar_normal_tissue_loss,
     projected_gradient_descent,
@@ -95,6 +96,30 @@ class TargetOARLossTests(unittest.TestCase):
                 float(gradient[index]), float(finite_difference), delta=2.0e-4
             )
 
+    def test_float64_dose_keeps_float64_gradient(self):
+        target = np.zeros((2, 2, 2), dtype=bool)
+        oar = np.zeros_like(target)
+        normal = np.zeros_like(target)
+        target[0, 0, 0] = True
+        oar[0, 0, 1] = True
+        normal[0, 1, 0] = True
+        loss = make_target_oar_normal_tissue_loss(
+            target, 2.0, oar, 1.0, normal, 2.0)
+        dose = np.zeros(target.shape, dtype=np.float64)
+        dose[0, 0, 0] = 1.234567890123
+        dose[0, 0, 1] = 1.234567890123
+        dose[0, 1, 0] = 2.234567890123
+        _, gradient = loss(dose)
+        self.assertEqual(gradient.dtype, np.float64)
+        step = 1.0e-6
+        for index in ((0, 0, 0), (0, 0, 1), (0, 1, 0)):
+            plus, minus = dose.copy(), dose.copy()
+            plus[index] += step
+            minus[index] -= step
+            finite_difference = (loss(plus)[0] - loss(minus)[0]) / (2 * step)
+            self.assertAlmostEqual(float(gradient[index]), finite_difference,
+                                   delta=1.0e-9)
+
     def test_rejects_empty_mask(self):
         mask = np.zeros((2, 2, 2), dtype=bool)
         with self.assertRaisesRegex(ValueError, "target mask must not be empty"):
@@ -135,6 +160,17 @@ class TargetOARLossTests(unittest.TestCase):
     def test_bounded_solver_rejects_bad_gradient(self):
         with self.assertRaisesRegex(ValueError, "weight gradient"):
             bounded_lbfgsb(lambda weights: (1.0, np.zeros(2)), [1.0])
+
+    def test_scaled_bounded_slsqp(self):
+        def objective(weights):
+            residual = weights - np.asarray((0.03, -0.01))
+            return 0.5 * float(np.dot(residual, residual)), residual
+
+        result = bounded_slsqp(objective, [0.2, 0.1], weight_scale=0.02,
+                               objective_scale=1.0e4)
+        self.assertTrue(result.converged)
+        np.testing.assert_allclose(result.weights, (0.03, 0.0), atol=1.0e-7)
+        self.assertAlmostEqual(result.objective, 0.5e-4)
 
 
 if __name__ == "__main__":

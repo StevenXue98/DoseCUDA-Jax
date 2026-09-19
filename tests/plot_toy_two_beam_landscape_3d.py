@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the saved two-beam toy BAO landscape and search paths in 3D.
+"""Render a saved two-beam toy BAO landscape and optional search paths in 3D.
 
 The surface joins 10-degree (or other saved grid) samples for display only;
 interpolated points are not additional DoseCUDA calculations. Path heights
@@ -96,8 +96,14 @@ def main():
     axis.set_box_aspect((1, 1, 0.72))
     axis.view_init(elev=args.elev, azim=args.azim)
     axis.legend(loc="upper left", fontsize="small")
-    fig.suptitle("Two-beam toy BAO: sampled loss surface and exact search paths\n"
-                 "Triangles = starts; X = final plans; surface between grid points is visual interpolation")
+    if summary["runs"]:
+        fig.suptitle("Two-beam toy BAO: sampled loss surface and exact search paths\n"
+                     "Triangles = starts; X = final plans; surface between grid "
+                     "points is visual interpolation")
+    else:
+        fig.suptitle("Two-beam toy BAO: sampled loss surface\n"
+                     "Surface between grid points is visual interpolation, "
+                     "not additional dose calculations")
     output = args.output or os.path.join(args.input_dir, "pair_landscape_3d.png")
     fig.savefig(output, dpi=180)
     plt.close(fig)

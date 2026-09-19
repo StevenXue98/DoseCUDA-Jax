@@ -45,15 +45,17 @@ CSV_COLUMNS = (
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--grid-step", type=float, default=2.0)
+    parser.add_argument("--inner-backend", choices=("cuda_lbfgsb", "influence_slsqp"),
+                        default="influence_slsqp",
+                        help="Use influence_slsqp for a start-stable small-plan reference")
     parser.add_argument("--output-dir", default=os.path.join(
-        ROOT, "test_phantom_output", "bao_toy_two_beam_2deg"))
+        ROOT, "test_phantom_output", "bao_toy_two_beam_2deg_accurate"))
     parser.add_argument("--checkpoint-every", type=int, default=10)
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--max-new-pairs", type=int, default=None,
                         help="Stop after this many new solves; useful to test resume")
-    parser.add_argument("--search-summary", default=os.path.join(
-        ROOT, "test_phantom_output", "bao_toy_two_beam", "summary.json"),
-                        help="Existing search paths to overlay; never rerun search")
+    parser.add_argument("--search-summary", default="none",
+                        help="Existing search paths to overlay, or 'none'; never rerun search")
     return parser.parse_args()
 
 
@@ -78,9 +80,10 @@ def write_json_atomic(path, value):
     os.replace(temporary, path)
 
 
-def load_or_start_checkpoint(path, step, pairs, signature):
+def load_or_start_checkpoint(path, step, pairs, signature, backend):
     if not os.path.exists(path):
         return {"schema_version": 1, "grid_step_deg": step,
+                "inner_backend": backend,
                 "case_signature": signature, "total_pairs": len(pairs),
                 "rows": [], "last_weights": None,
                 "last_angles_deg": None, "warm_start_retries": 0}
@@ -88,9 +91,12 @@ def load_or_start_checkpoint(path, step, pairs, signature):
         state = json.load(handle)
     if (state.get("schema_version") != 1 or state.get("grid_step_deg") != step
             or state.get("case_signature") != signature
+            or state.get("inner_backend", "cuda_lbfgsb") != backend
             or state.get("total_pairs") != len(pairs)):
         raise ValueError("checkpoint does not match this case and angle grid")
     rows = state.get("rows")
+    stationarity_tolerance = (1.0e-6 if backend == "influence_slsqp"
+                              else STATIONARITY_TOLERANCE)
     if not isinstance(rows, list) or len(rows) > len(pairs):
         raise ValueError("invalid checkpoint row count")
     for index, row in enumerate(rows):
@@ -98,7 +104,7 @@ def load_or_start_checkpoint(path, step, pairs, signature):
             raise ValueError(f"checkpoint angle order differs at row {index}")
         if (row["beam_count"] != 2 or row["spot_count"] != 90
                 or not np.isfinite(row["loss"])
-                or row["projected_gradient_norm"] > STATIONARITY_TOLERANCE):
+                or row["projected_gradient_norm"] > stationarity_tolerance):
             raise ValueError(f"checkpoint has an uncertified solve at row {index}")
     if rows and (state.get("last_weights") is None or
                  len(state["last_weights"]) != 90):
@@ -182,7 +188,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     checkpoint_path = os.path.join(args.output_dir, "reference_checkpoint.json")
     state = load_or_start_checkpoint(checkpoint_path, args.grid_step,
-                                     pairs, signature)
+                                     pairs, signature, args.inner_backend)
     start_count = len(state["rows"])
     print(f"Reference grid: {len(angles)} angles, {len(pairs)} unique pairs; "
           f"resuming at {start_count}/{len(pairs)}", flush=True)
@@ -192,13 +198,14 @@ def main():
     for index in range(start_count, len(pairs)):
         pair = pairs[index]
         try:
-            result = solve_subset(pair, case)
+            result = solve_subset(pair, case, backend=args.inner_backend)
         except RuntimeError:
             previous = state["last_weights"]
             if previous is None:
                 raise
             state["warm_start_retries"] += 1
-            result = solve_subset(pair, case, np.asarray(previous, dtype=np.float32))
+            result = solve_subset(pair, case, np.asarray(previous, dtype=np.float32),
+                                  backend=args.inner_backend)
         state["rows"].append(without_weights(result))
         state["last_weights"] = result["weights"].tolist()
         state["last_angles_deg"] = list(pair)
@@ -220,9 +227,12 @@ def main():
             return
     write_json_atomic(checkpoint_path, state)
 
-    with open(args.search_summary, encoding="utf-8") as handle:
-        previous_search = json.load(handle)
-    runs = previous_search["runs"]
+    if args.search_summary.lower() == "none":
+        runs = []
+    else:
+        with open(args.search_summary, encoding="utf-8") as handle:
+            previous_search = json.load(handle)
+        runs = previous_search["runs"]
     rows = state["rows"]
     best = min(rows, key=lambda row: row["loss"])
     matrix = reference_landscape(rows, angles)
@@ -233,6 +243,7 @@ def main():
     summary = {
         "case": "same full-voxel synthetic target/OAR/normal-tissue toy case",
         "case_signature": signature,
+        "inner_backend": args.inner_backend,
         "grid_step_deg": args.grid_step,
         "grid_unique_pairs": len(rows),
         "grid_best": best,
@@ -241,7 +252,8 @@ def main():
         "grid_warm_start_retries": state["warm_start_retries"],
         "beam_exchange_max_abs_dose_error": exchange_error,
         "search_rerun": False,
-        "prior_search_summary": os.path.abspath(args.search_summary),
+        "prior_search_summary": None if not runs else
+                                os.path.abspath(args.search_summary),
         "runs": runs,
     }
     summary_path = os.path.join(args.output_dir, "summary.json")

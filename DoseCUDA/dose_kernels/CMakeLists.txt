@@ -8,6 +8,7 @@ target_sources(${MODULE_NAME}
         CudaClasses.cu
         IMPTClasses.cu
         IMPTWeightGradients.cu
+        IMPTWeightOptimizer.cu
         IMRTClasses.cu
         TextureClasses.cu)
 

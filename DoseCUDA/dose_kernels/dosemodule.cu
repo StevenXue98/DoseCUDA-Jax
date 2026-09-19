@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 #define PY_SSIZE_T_CLEAN
@@ -10,6 +11,7 @@
 #include "IMRTClasses.cuh"
 #include "IMPTClasses.cuh"
 #include "IMPTWeightGradients.cuh"
+#include "IMPTWeightOptimizer.cuh"
 #include "MemoryClasses.h"
 
 
@@ -572,6 +574,243 @@ static PyObject* proton_spot_weight_vjp(PyObject *self, PyObject *args) {
 }
 
 
+struct PyObjectDecref {
+	void operator()(PyObject *object) const { Py_XDECREF(object); }
+};
+
+/** Host-side geometry for the experimental, separate CUDA weight solver. */
+struct PreparedWeightBeam {
+	std::unique_ptr<HostPointer<Layer>> layers;
+	std::unique_ptr<HostPointer<Spot>> spots;
+	std::unique_ptr<HostPointer<size_t>> sorted_to_original;
+	std::unique_ptr<IMPTBeam> beam;
+	std::unique_ptr<IMPTDose> dose;
+	int original_offset;
+
+	PreparedWeightBeam(PyObject *model_object, PyObject *wet_object,
+	                   PyObject *beam_object, PyArrayObject *volume,
+	                   PyArrayObject *spacing, PyArrayObject *origin,
+	                   int offset) : original_offset(offset) {
+		double vsadx, vsady, ga, ta;
+		if (!pyobject_getfloat(model_object, "VSADX", &vsadx)
+		 || !pyobject_getfloat(model_object, "VSADY", &vsady)
+		 || !pyobject_getfloat(beam_object, "gantry_angle", &ga)
+		 || !pyobject_getfloat(beam_object, "couch_angle", &ta)) {
+			throw std::invalid_argument("invalid beam geometry attributes");
+		}
+		PyArrayObject *divergence, *depths, *sigmas, *idds, *wet;
+		PyArrayObject *iso, *spot_array;
+		if (!pyobject_getarray(model_object, "divergence_params", 2, &divergence)
+		 || !pyobject_getarray(model_object, "lut_depths", 2, &depths)
+		 || !pyobject_getarray(model_object, "lut_sigmas", 2, &sigmas)
+		 || !pyobject_getarray(model_object, "lut_idds", 2, &idds)
+		 || !pyobject_getarray(wet_object, "voxel_data", 3, &wet)
+		 || !pyobject_getarray(beam_object, "iso", 1, &iso)
+		 || !pyobject_getarray(beam_object, "spot_list", 2, &spot_array)) {
+			throw std::invalid_argument("invalid beam arrays");
+		}
+		for (int axis = 0; axis < 3; ++axis) {
+			if (PyArray_DIM(wet, axis) != PyArray_DIM(volume, axis)) {
+				throw std::invalid_argument("WET shape differs from dose volume");
+			}
+		}
+		if (PyArray_DIM(spot_array, 1) != 4 || PyArray_DIM(spot_array, 0) <= 0) {
+			throw std::invalid_argument("spot_list must have shape (n, 4)");
+		}
+		if (!PyArray_IS_C_CONTIGUOUS(divergence)
+		 || !PyArray_IS_C_CONTIGUOUS(depths)
+		 || !PyArray_IS_C_CONTIGUOUS(sigmas)
+		 || !PyArray_IS_C_CONTIGUOUS(idds)
+		 || !PyArray_IS_C_CONTIGUOUS(wet)
+		 || !PyArray_IS_C_CONTIGUOUS(iso)
+		 || !PyArray_IS_C_CONTIGUOUS(spot_array)
+		 || PyArray_DIM(iso, 0) != 3) {
+			throw std::invalid_argument("beam arrays must be contiguous with a 3-vector isocenter");
+		}
+		const int n_energies = static_cast<int>(PyArray_DIM(depths, 0));
+		const int n_spots = static_cast<int>(PyArray_DIM(spot_array, 0));
+		if (!n_energies || PyArray_DIM(divergence, 0) != n_energies
+		    || PyArray_DIM(sigmas, 0) != n_energies
+		    || PyArray_DIM(idds, 0) != n_energies
+		    || PyArray_DIM(divergence, 1) != 5
+		    || PyArray_DIM(depths, 1) != LUT_LENGTH
+		    || PyArray_DIM(sigmas, 1) != LUT_LENGTH
+		    || PyArray_DIM(idds, 1) != LUT_LENGTH) {
+			throw std::invalid_argument("beam-model energy dimensions disagree");
+		}
+		size_t dims[3] = {
+			static_cast<size_t>(PyArray_DIM(volume, 0)),
+			static_cast<size_t>(PyArray_DIM(volume, 1)),
+			static_cast<size_t>(PyArray_DIM(volume, 2))};
+		float *origin_data = pyarray_as<float>(origin);
+		float *iso_data = pyarray_as<float>(iso);
+		float adjusted_iso[3] = {
+			iso_data[0] - origin_data[0],
+			iso_data[1] - origin_data[1],
+			iso_data[2] - origin_data[2]};
+		IMPTBeam::Model model;
+		model.vsadx = static_cast<float>(vsadx);
+		model.vsady = static_cast<float>(vsady);
+		beam.reset(new IMPTBeam(adjusted_iso,
+			fmodf(static_cast<float>(ga) + 180.0f, 360.0f),
+			static_cast<float>(ta), &model));
+		layers.reset(new HostPointer<Layer>(n_energies));
+		spots.reset(new HostPointer<Spot>(n_spots));
+		sorted_to_original.reset(new HostPointer<size_t>(n_spots));
+		make_indexed_spot_array(spot_array, *spots, *sorted_to_original);
+		beam->n_energies = n_energies;
+		beam->layers = layers->get();
+		beam->spots = spots->get();
+		beam->n_spots = n_spots;
+		beam->divergence_params = pyarray_as<float>(divergence);
+		beam->dvp_len = 5;
+		beam->lut_depths = pyarray_as<float>(depths);
+		beam->lut_sigmas = pyarray_as<float>(sigmas);
+		beam->lut_idds = pyarray_as<float>(idds);
+		beam->lut_len = LUT_LENGTH;
+		beam->importLayers();
+		dose.reset(new IMPTDose(dims, pyarray_as<float>(spacing)[0]));
+		dose->DensityArray = pyarray_as<float>(volume);
+		dose->WETArray = pyarray_as<float>(wet);
+	}
+};
+
+
+static PyObject* proton_optimize_spot_weights(PyObject *self, PyObject *args) {
+	PyObject *models_object, *volume_object, *wets_object, *beams_object;
+	PyObject *masks_object, *weights_object;
+	double prescription, oar_limit, normal_limit, dose_scale, tolerance;
+	int max_iterations, gpu_id;
+	const char *method;
+	if (!PyArg_ParseTuple(args, "OOOOOddddOidsi", &models_object,
+	    &volume_object, &wets_object, &beams_object, &masks_object,
+	    &prescription, &oar_limit, &normal_limit, &dose_scale,
+	    &weights_object, &max_iterations, &tolerance, &method, &gpu_id)) {
+		return NULL;
+	}
+	std::unique_ptr<PyObject, PyObjectDecref> models(
+		PySequence_Fast(models_object, "models must be a sequence"));
+	std::unique_ptr<PyObject, PyObjectDecref> wets(
+		PySequence_Fast(wets_object, "WET volumes must be a sequence"));
+	std::unique_ptr<PyObject, PyObjectDecref> beams(
+		PySequence_Fast(beams_object, "beams must be a sequence"));
+	std::unique_ptr<PyObject, PyObjectDecref> masks(
+		PySequence_Fast(masks_object, "masks must be a sequence"));
+	if (!models || !wets || !beams || !masks) return NULL;
+	const Py_ssize_t beam_count = PySequence_Fast_GET_SIZE(beams.get());
+	if (beam_count == 0 || PySequence_Fast_GET_SIZE(models.get()) != beam_count
+	    || PySequence_Fast_GET_SIZE(wets.get()) != beam_count
+	    || PySequence_Fast_GET_SIZE(masks.get()) != 3) {
+		PyErr_SetString(PyExc_ValueError, "beam/model/WET counts or mask count differ");
+		return NULL;
+	}
+	PyArrayObject *volume, *spacing, *origin;
+	if (!pyobject_getarray(volume_object, "voxel_data", 3, &volume)
+	 || !pyobject_getarray(volume_object, "spacing", 1, &spacing)
+	 || !pyobject_getarray(volume_object, "origin", 1, &origin)) return NULL;
+	if (!PyArray_IS_C_CONTIGUOUS(volume)
+	    || !PyArray_IS_C_CONTIGUOUS(spacing)
+	    || !PyArray_IS_C_CONTIGUOUS(origin)
+	    || PyArray_DIM(spacing, 0) != 3 || PyArray_DIM(origin, 0) != 3) {
+		PyErr_SetString(PyExc_ValueError, "invalid dose volume layout");
+		return NULL;
+	}
+	PyArrayObject *mask_arrays[3];
+	for (int i = 0; i < 3; ++i) {
+		PyObject *item = PySequence_Fast_GET_ITEM(masks.get(), i);
+		if (!PyArray_Check(item)) {
+			PyErr_SetString(PyExc_ValueError, "masks must be NumPy arrays");
+			return NULL;
+		}
+		mask_arrays[i] = reinterpret_cast<PyArrayObject *>(item);
+		if (!pyarray_typecheck(mask_arrays[i], 3, NPY_UBYTE)
+		    || !PyArray_IS_C_CONTIGUOUS(mask_arrays[i])) {
+			PyErr_SetString(PyExc_ValueError, "masks must be contiguous uint8 volumes");
+			return NULL;
+		}
+		for (int axis = 0; axis < 3; ++axis) {
+			if (PyArray_DIM(mask_arrays[i], axis) != PyArray_DIM(volume, axis)) {
+				PyErr_SetString(PyExc_ValueError, "mask shape differs from dose volume");
+				return NULL;
+			}
+		}
+	}
+	if (!PyArray_Check(weights_object)) {
+		PyErr_SetString(PyExc_ValueError, "weights must be a NumPy array");
+		return NULL;
+	}
+	PyArrayObject *weights_array = reinterpret_cast<PyArrayObject *>(weights_object);
+	if (!pyarray_typecheck(weights_array, 1, NPY_FLOAT)
+	    || !PyArray_IS_C_CONTIGUOUS(weights_array)) {
+		PyErr_SetString(PyExc_ValueError, "weights must be contiguous float32");
+		return NULL;
+	}
+	try {
+		std::vector<std::unique_ptr<PreparedWeightBeam>> prepared;
+		std::vector<IMPTBeam *> host_beams;
+		std::vector<IMPTDose *> host_doses;
+		int total_spots = 0;
+		for (Py_ssize_t i = 0; i < beam_count; ++i) {
+			prepared.emplace_back(new PreparedWeightBeam(
+				PySequence_Fast_GET_ITEM(models.get(), i),
+				PySequence_Fast_GET_ITEM(wets.get(), i),
+				PySequence_Fast_GET_ITEM(beams.get(), i), volume, spacing, origin,
+				total_spots));
+			host_beams.push_back(prepared.back()->beam.get());
+			host_doses.push_back(prepared.back()->dose.get());
+			total_spots += prepared.back()->beam->n_spots;
+		}
+		if (PyArray_DIM(weights_array, 0) != total_spots) {
+			PyErr_SetString(PyExc_ValueError, "initial weight count differs from spots");
+			return NULL;
+		}
+		std::vector<float> sorted_weights(total_spots);
+		const float *original = pyarray_as<float>(weights_array);
+		for (const auto &entry : prepared) {
+			for (int i = 0; i < entry->beam->n_spots; ++i) {
+				sorted_weights[entry->original_offset + i] =
+					original[entry->original_offset + (*entry->sorted_to_original)[i]];
+			}
+		}
+		const auto result = optimize_impt_weights_cuda(
+			gpu_id, host_doses, host_beams,
+			pyarray_as<unsigned char>(mask_arrays[0]),
+			pyarray_as<unsigned char>(mask_arrays[1]),
+			pyarray_as<unsigned char>(mask_arrays[2]),
+			static_cast<float>(prescription), static_cast<float>(oar_limit),
+			static_cast<float>(normal_limit), static_cast<float>(dose_scale),
+			sorted_weights.data(), max_iterations,
+			static_cast<float>(tolerance), method);
+		npy_intp shape[1] = { total_spots };
+		PyObject *weights_result = PyArray_SimpleNew(1, shape, NPY_FLOAT);
+		if (!weights_result) return NULL;
+		float *output = pyarray_as<float>(
+			reinterpret_cast<PyArrayObject *>(weights_result));
+		for (const auto &entry : prepared) {
+			for (int i = 0; i < entry->beam->n_spots; ++i) {
+				output[entry->original_offset + (*entry->sorted_to_original)[i]] =
+					result.weights[entry->original_offset + i];
+			}
+		}
+		return Py_BuildValue("{s:N,s:f,s:f,s:i,s:i,s:i,s:O}",
+			"weights", weights_result,
+			"objective", result.objective,
+			"projected_gradient", result.projected_gradient,
+			"iterations", result.iterations,
+			"forward_evaluations", result.forward_evaluations,
+			"gradient_evaluations", result.gradient_evaluations,
+			"converged", result.converged ? Py_True : Py_False);
+	} catch (std::bad_alloc &) {
+		PyErr_SetString(PyExc_MemoryError, "not enough memory for CUDA weight solver");
+	} catch (std::invalid_argument &error) {
+		if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, error.what());
+	} catch (std::runtime_error &error) {
+		PyErr_Format(PyExc_RuntimeError, "CUDA weight solver: %s", error.what());
+	}
+	return NULL;
+}
+
+
 static PyObject * photon_dose(PyObject* self, PyObject* args) {
 
 	PyObject *model_instance, *volume_instance, *cp_instance;
@@ -773,6 +1012,12 @@ static PyMethodDef DoseMethods[] = {
 		proton_spot_weight_vjp,
 		METH_VARARGS,
 		"Apply the fixed-geometry proton spot-dose transpose to a voxel adjoint."
+	},
+	{
+		"proton_optimize_spot_weights_cuda",
+		proton_optimize_spot_weights,
+		METH_VARARGS,
+		"Experimental matrix-free float32 GPU spot-weight solve."
 	},
 	{
 		"photon_dose_cuda",

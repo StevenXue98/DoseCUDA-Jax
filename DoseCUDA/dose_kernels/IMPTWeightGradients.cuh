@@ -3,6 +3,12 @@
 
 #include "IMPTClasses.cuh"
 
+__global__ void pencilBeamWeightVJPKernel(
+    IMPTDose *dose,
+    IMPTBeam *beam,
+    const float *dose_adjoint,
+    float *weight_gradient);
+
 /** Apply the transpose of the fixed-geometry proton spot-dose operator.
  *
  * Given a voxel adjoint dL/dDose, this computes one derivative dL/dMU for

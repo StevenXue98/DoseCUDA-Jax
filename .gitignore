@@ -16,6 +16,7 @@ test_phantom_output/bao_toy_baseline/
 test_phantom_output/bao_toy_gaussian*/
 test_phantom_output/bao_toy_three_beam/
 test_phantom_output/bao_toy_two_beam*/
+test_phantom_output/bao_cuda_inner_benchmark/
 
 # Distribution / packaging
 *.egg-info/

@@ -20,7 +20,11 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from DoseCUDA.impt_weight_optimization import FixedGeometryPlanDose  # noqa: E402
+from DoseCUDA.impt_weight_optimization import (  # noqa: E402
+    FixedGeometryPlanDose,
+    InfluenceMatrixPlanDose,
+    bounded_slsqp,
+)
 from run_toy_bao_baseline import (  # noqa: E402
     NORMAL_LIMIT,
     OAR_LIMIT,
@@ -52,14 +56,24 @@ def make_joint_operator(angles, grid, plan, base_beam):
     return FixedGeometryPlanDose(grid, angle_plan)
 
 
-def solve_subset(angles, case, initial_weights=None):
+def solve_subset(angles, case, initial_weights=None, *, backend="cuda_lbfgsb"):
+    if backend not in ("cuda_lbfgsb", "influence_slsqp"):
+        raise ValueError("unsupported inner-solver backend")
     grid, plan, beam, body, target, oar, normal, loss = case
     operator = make_joint_operator(angles, grid, plan, beam)
     initial = (np.concatenate([member.weights for member in operator.beams])
                if initial_weights is None else
                np.asarray(initial_weights, dtype=np.float32))
     started = perf_counter()
-    result, restarts, evaluations = solve_weights(operator, loss, initial)
+    if backend == "cuda_lbfgsb":
+        result, restarts, evaluations = solve_weights(operator, loss, initial)
+    else:
+        influence = InfluenceMatrixPlanDose(operator)
+        result = bounded_slsqp(
+            lambda weights: influence.value_and_gradient(weights, loss),
+            initial, weight_scale=0.02, objective_scale=1.0e4,
+            stationarity_tolerance=1.0e-6)
+        restarts, evaluations = 0, result.evaluations
     seconds = perf_counter() - started
     if not result.converged:
         raise RuntimeError(

@@ -55,7 +55,9 @@ def make_target_oar_loss(
     oar_count = int(np.count_nonzero(oar_mask))
 
     def loss(dose: np.ndarray) -> tuple[float, np.ndarray]:
-        dose = np.asarray(dose, dtype=np.float32)
+        dose = np.asarray(dose)
+        if dose.dtype not in (np.dtype("float32"), np.dtype("float64")):
+            dose = dose.astype(np.float32)
         if dose.shape != target_mask.shape or not np.all(np.isfinite(dose)):
             raise ValueError("dose must be finite and match the mask shape")
 
@@ -68,7 +70,7 @@ def make_target_oar_loss(
             / oar_count
         ) / scale
 
-        dose_gradient = np.zeros(dose.shape, dtype=np.float32)
+        dose_gradient = np.zeros(dose.shape, dtype=dose.dtype)
         dose_gradient[target_mask] += 2.0 * target_error / (target_count * scale)
         dose_gradient[oar_mask] += (
             2.0 * oar_weight * oar_excess / (oar_count * scale)
@@ -122,7 +124,7 @@ def make_target_oar_normal_tissue_loss(
 
     def loss(dose: np.ndarray) -> tuple[float, np.ndarray]:
         value, dose_gradient = base_loss(dose)
-        dose = np.asarray(dose, dtype=np.float32)
+        dose = np.asarray(dose, dtype=dose_gradient.dtype)
         excess = np.maximum(dose[normal_tissue_mask] - limit, 0.0)
         value += weight * np.sum(excess * excess, dtype=np.float64) / (count * scale)
         dose_gradient[normal_tissue_mask] += 2.0 * weight * excess / (count * scale)
@@ -302,6 +304,52 @@ class FixedGeometryPlanDose:
         return value, self.weight_vjp(dose_gradient)
 
 
+class InfluenceMatrixPlanDose:
+    """Small fixed plan represented by CUDA-computed unit-spot dose columns.
+
+    This optional operator trades memory for a smooth float64 weight objective.
+    It is useful for small BAO reference cases, not large clinical matrices.
+    Beam geometry and each dose column still come from the original CUDA model.
+    """
+
+    def __init__(self, fixed_plan: FixedGeometryPlanDose, *, max_elements=10_000_000):
+        shape = tuple(int(value) for value in fixed_plan.beams[0].dose_grid.size)
+        n_voxels = int(np.prod(shape))
+        self.n_spots = fixed_plan.n_spots
+        if self.n_spots * n_voxels > max_elements:
+            raise ValueError("influence matrix exceeds max_elements")
+        self.shape = shape
+        original_weights = fixed_plan.weights
+        matrix = np.empty((n_voxels, self.n_spots), dtype=np.float64)
+        unit = np.zeros(self.n_spots, dtype=np.float32)
+        try:
+            for index in range(self.n_spots):
+                unit[index] = 1.0
+                matrix[:, index] = fixed_plan.dose(unit).ravel()
+                unit[index] = 0.0
+        finally:
+            fixed_plan.dose(original_weights)
+        self.matrix = matrix
+
+    def dose(self, weights):
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (self.n_spots,) or not np.all(np.isfinite(weights)):
+            raise ValueError("weights must be a finite vector matching the spots")
+        return np.einsum("ij,j->i", self.matrix, weights).reshape(self.shape)
+
+    def weight_vjp(self, dose_gradient):
+        dose_gradient = np.asarray(dose_gradient, dtype=np.float64)
+        if dose_gradient.shape != self.shape or not np.all(np.isfinite(dose_gradient)):
+            raise ValueError("dose_gradient must be finite and match the dose grid")
+        return np.einsum("ij,i->j", self.matrix, dose_gradient.ravel())
+
+    def value_and_gradient(self, weights, loss: LossAndDoseGradient):
+        value, dose_gradient = loss(self.dose(weights))
+        if not np.isfinite(value):
+            raise ValueError("loss must be finite")
+        return float(value), self.weight_vjp(dose_gradient)
+
+
 @dataclass(frozen=True)
 class ProjectedGradientResult:
     weights: np.ndarray
@@ -319,6 +367,81 @@ class BoundedLBFGSBResult:
     projected_gradient_norm: float
     converged: bool
     message: str
+
+
+@dataclass(frozen=True)
+class BoundedSLSQPResult:
+    weights: np.ndarray
+    objective: float
+    iterations: int
+    evaluations: int
+    projected_gradient_norm: float
+    converged: bool
+    message: str
+
+
+def bounded_slsqp(
+    value_and_gradient: ValueAndWeightGradient,
+    initial_weights,
+    *,
+    weight_scale=1.0,
+    objective_scale=1.0,
+    max_iterations=1000,
+    absolute_tolerance=1.0e-12,
+    stationarity_tolerance=1.0e-6,
+) -> BoundedSLSQPResult:
+    """Nonnegative SLSQP solve with explicit variable/objective scaling.
+
+    Scaling affects the optimizer only; the result and stationarity check use
+    the original weights and objective units. For high-accuracy small cases,
+    pair this with ``InfluenceMatrixPlanDose`` to avoid float32 line-search
+    noise from repeated CUDA dose evaluation.
+    """
+    from scipy.optimize import minimize
+
+    weights = np.asarray(initial_weights, dtype=np.float64)
+    if weights.ndim != 1 or weights.size == 0 or not np.all(np.isfinite(weights)):
+        raise ValueError("initial_weights must be a nonempty finite 1D array")
+    settings = np.asarray((weight_scale, objective_scale, absolute_tolerance,
+                           stationarity_tolerance), dtype=np.float64)
+    if not np.all(np.isfinite(settings)) or np.any(settings <= 0):
+        raise ValueError("scales and tolerances must be finite and positive")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be positive")
+    weights = np.maximum(weights, 0.0)
+
+    def scaled_value_and_gradient(scaled_weights):
+        value, gradient = value_and_gradient(weight_scale * scaled_weights)
+        value = float(value)
+        gradient = np.asarray(gradient, dtype=np.float64)
+        if (not np.isfinite(value) or gradient.shape != weights.shape or
+                not np.all(np.isfinite(gradient))):
+            raise ValueError("callback must return a finite value and gradient")
+        return objective_scale * value, objective_scale * weight_scale * gradient
+
+    result = minimize(
+        scaled_value_and_gradient,
+        weights / weight_scale,
+        method="SLSQP",
+        jac=True,
+        bounds=[(0.0, None)] * weights.size,
+        options={"ftol": float(absolute_tolerance),
+                 "maxiter": int(max_iterations)},
+    )
+    final_weights = np.maximum(weight_scale * result.x, 0.0)
+    final_value, final_gradient = value_and_gradient(final_weights)
+    final_gradient = np.asarray(final_gradient, dtype=np.float64)
+    projected = final_weights - np.maximum(final_weights - final_gradient, 0.0)
+    projected_norm = float(np.linalg.norm(projected, ord=np.inf))
+    return BoundedSLSQPResult(
+        weights=final_weights,
+        objective=float(final_value),
+        iterations=int(result.nit),
+        evaluations=int(result.nfev) + 1,
+        projected_gradient_norm=projected_norm,
+        converged=bool(result.success and projected_norm <= stationarity_tolerance),
+        message=str(result.message),
+    )
 
 
 def bounded_lbfgsb(

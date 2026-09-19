@@ -247,10 +247,13 @@ are **not** additional dose calculations. The colored path heights are exact
 jointly re-optimized losses. Use `--elev`, `--azim`, and `--output` to save
 other viewing angles.
 
-For a finer, **reference-only** scan of the same two-beam toy case, run:
+To reproduce the original exploratory **reference-only** 2° scan, run:
 
 ```bash
-python tests/compute_toy_two_beam_reference.py
+python tests/compute_toy_two_beam_reference.py \
+  --inner-backend cuda_lbfgsb \
+  --output-dir test_phantom_output/bao_toy_two_beam_2deg \
+  --search-summary test_phantom_output/bao_toy_two_beam/summary.json
 python tests/plot_toy_two_beam_landscape_3d.py \
   --input-dir test_phantom_output/bao_toy_two_beam_2deg
 ```
@@ -268,13 +271,65 @@ that alternative weight initializations can change the solved loss by several
 percent even when the existing projected-gradient criterion passes, so narrow
 peaks and the exact ranking of nearby grid points need additional checking.
 
-To compare nominal continuous two-angle searches on that saved map, run:
+For a start-stable small-plan reference, use the separate accurate backend:
+
+```bash
+python tests/validate_toy_two_beam_inner_accuracy.py
+python tests/compute_toy_two_beam_reference.py
+python tests/plot_toy_two_beam_landscape_3d.py \
+  --input-dir test_phantom_output/bao_toy_two_beam_2deg_accurate
+python tests/plot_toy_inner_solver_discrepancy.py
+```
+
+This builds one unit-spot dose column per spot using DoseCUDA, then solves the
+90-weight convex problem in float64 with bounded SQP. It checks the resulting
+plan with a fresh DoseCUDA forward pass. The old CUDA-callback L-BFGS-B solver
+remains available; the new backend is explicitly selected and is intended for
+small reference cases because its full influence matrix does not scale to a
+large treatment plan. The accurate grid uses its own resumable checkpoint and
+does not overwrite the earlier 2° scan. No legacy search paths are overlaid,
+since their loss heights came from the less accurate inner solver.
+The final command compares the old and accurate grid values pair by pair and
+plots where inner-solver error altered the landscape.
+
+For a separate **matrix-free float32 CUDA inner-solver benchmark**, run:
+
+```bash
+python tests/benchmark_cuda_inner_solvers.py \
+  --max-iterations 500 --gradient-tolerance 1e-5 --reference
+python tests/benchmark_cuda_inner_solvers.py \
+  --methods fista --max-iterations 2000 --gradient-tolerance 1e-5 \
+  --reference --warm-start-check
+```
+
+The experimental `DoseCUDA.cuda_weight_solver.solve_cuda_spot_weights` path
+keeps fixed-angle WET, dose, and weight-gradient buffers on the GPU, calls the
+existing pencil-beam forward and weight-VJP kernels, and builds **no** dose
+influence matrix. It benchmarks projected gradient, accelerated projected
+gradient (FISTA), projected nonlinear conjugate gradient, and a host-assisted
+L-BFGS variant with persistent GPU physics buffers. The CPU/SQP reference is
+unchanged and is used only to measure loss gaps. The benchmark checks each
+reported GPU loss with a fresh DoseCUDA forward pass. A warm-start experiment
+reuses weights from one three-beam angle triple at a nearby triple, as an
+actual outer BAO step could do. These are experimental solver candidates for
+the synthetic objective, not clinically validated plans or replacements for
+the accurate reference. In particular, a loose projected-gradient threshold
+can still leave a large inner-loss gap on this ill-conditioned problem. The
+projected methods keep their weight vectors on-device but still synchronize
+small loss/line-search scalars with the host; this is not a zero-transfer
+implementation. Use `--output` to save a JSON benchmark record under an
+ignored output directory.
+
+To compare the earlier nominal continuous two-angle searches on the exploratory
+map, run:
 
 ```bash
 python tests/compare_toy_two_beam_outer_methods.py
 ```
 
-This reuses the 2° grid without rebuilding it. Six common starts compare
+This reuses the original 2° grid without rebuilding it. It still uses the
+old CUDA-callback inner solver, so its method rankings are exploratory rather
+than rankings against the accurate reference above. Six common starts compare
 fixed-weight Gaussian directions (24 antithetic pairs, σ = 2°) with central
 finite differences of the fully re-optimized loss (steps of 2° and 4°).
 Every proposed move is accepted only after a fresh joint 90-weight solve
