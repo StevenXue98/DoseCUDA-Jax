@@ -12,6 +12,7 @@ import csv
 import os
 import sys
 from copy import copy, deepcopy
+from itertools import product
 
 import matplotlib
 
@@ -42,6 +43,10 @@ def parse_args():
         help="research-style target/OAR/normal-tissue objective or old toy loss",
     )
     parser.add_argument(
+        "--spot-set", choices=("covering15", "validation"), default=None,
+        help="fixed 15-spot planning toy or original three-spot validation beam",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
     )
@@ -59,6 +64,19 @@ def main():
         raise ValueError("half-width must be an integer multiple of step")
 
     grid, plan, beam = create_case()
+    spot_set = args.spot_set or (
+        "validation" if args.objective == "legacy" else "covering15"
+    )
+    if spot_set == "covering15":
+        # A regular beam-eye-view lattice at energy ID 38. These toy positions
+        # cover the interior target at the nominal angle; they are fixed
+        # before scanning, not regenerated or selected per angle. Two other
+        # trial energy layers had zero optimized weight throughout 21-25 deg.
+        beam.resetSpots()
+        for x_offset, y_offset in product(
+            (-12, -6, 0, 6, 12), (-6, 0, 6)
+        ):
+            beam.addSingleSpot(-23 + x_offset, 8 + y_offset, 0.05, 38)
     nominal_angle = float(beam.gantry_angle)
     base_beam = deepcopy(beam)
     initial_weights = np.asarray(base_beam.spot_list[:, 2], dtype=np.float32).copy()
@@ -87,6 +105,7 @@ def main():
     output_dir = args.output_dir or os.path.join(
         REPOSITORY_ROOT, "test_phantom_output", "optimized_gantry_scan",
         args.objective.replace("-", "_"),
+        spot_set,
     )
 
     def make_operator(angle):
@@ -96,14 +115,38 @@ def main():
         angle_plan.beam_list = [angle_beam]
         return FixedGeometryPlanDose(grid, angle_plan)
 
+    def solve_weights(operator, start_weights):
+        # The float32 CUDA callback can trip SciPy's objective-change stop
+        # before the independent stationarity check passes. Retry from that
+        # candidate, but do not relabel a failed check as convergence.
+        attempts = []
+        for _ in range(4):
+            candidate = bounded_lbfgsb(
+                lambda weights: operator.value_and_gradient(weights, loss),
+                start_weights,
+            )
+            attempts.append(candidate)
+            if candidate.converged:
+                break
+            start_weights = candidate.weights
+        solution = attempts[-1]
+        return (
+            solution,
+            sum(result.iterations for result in attempts),
+            sum(result.evaluations for result in attempts),
+            len(attempts) - 1,
+        )
+
     nominal_operator = make_operator(nominal_angle)
-    nominal_solution = bounded_lbfgsb(
-        lambda weights: nominal_operator.value_and_gradient(weights, loss),
-        initial_weights,
+    nominal_solution, _, _, nominal_restarts = solve_weights(
+        nominal_operator, initial_weights
     )
     if not nominal_solution.converged:
         raise RuntimeError(
-            "nominal weight solve did not converge: " + nominal_solution.message
+            "nominal weight solve did not converge "
+            f"(projected-gradient norm "
+            f"{nominal_solution.projected_gradient_norm:.6g}): "
+            + nominal_solution.message
         )
     nominal_weights = nominal_solution.weights.copy()
 
@@ -113,25 +156,27 @@ def main():
     for angle in angles:
         operator = make_operator(angle)
         fixed_loss = loss(operator.dose(nominal_weights))[0]
-        solution = bounded_lbfgsb(
-            lambda weights: operator.value_and_gradient(weights, loss),
-            nominal_weights,
+        solution, iterations, evaluations, restarts = solve_weights(
+            operator, nominal_weights
         )
         optimized_dose = operator.dose(solution.weights)
         row = {
             "objective": args.objective,
+            "spot_set": spot_set,
             "gantry_angle_deg": float(angle),
             "fixed_weight_loss": float(fixed_loss),
             "optimized_loss": solution.objective,
             "converged": solution.converged,
             "projected_gradient_norm": solution.projected_gradient_norm,
-            "iterations": solution.iterations,
-            "evaluations": solution.evaluations,
+            "iterations": iterations,
+            "evaluations": evaluations,
+            "restarts": restarts,
             "target_mean_dose": float(np.mean(optimized_dose[target_mask])),
             "target_d95_dose": float(np.percentile(optimized_dose[target_mask], 5)),
             "oar_max_dose": float(np.max(optimized_dose[oar_mask])),
             "full_grid_max_dose": float(np.max(optimized_dose)),
             "body_max_dose": float(np.max(optimized_dose[body_mask])),
+            "active_spots": int(np.count_nonzero(solution.weights > 1.0e-4)),
         }
         row.update(
             {f"spot_weight_{index}": float(weight)
@@ -169,17 +214,26 @@ def main():
     axes[0].set_ylabel(f"{args.objective} toy loss")
     axes[0].legend()
     axes[0].grid(alpha=0.25)
-    for index in range(initial_weights.size):
-        axes[1].plot(angles, weights[:, index], label=f"Spot {index + 1}")
+    if spot_set == "covering15":
+        axes[1].plot(angles, np.sum(weights, axis=1), label="Total spot weight")
+        axes[1].set_ylabel("Optimized total spot weight")
+    else:
+        for index in range(initial_weights.size):
+            axes[1].plot(angles, weights[:, index], label=f"Spot {index + 1}")
+        axes[1].set_ylabel("Optimized spot weight")
     axes[1].axvline(nominal_angle, color="0.5", linestyle="--", linewidth=1)
-    axes[1].set_ylabel("Optimized spot weight")
     axes[1].legend()
     axes[1].grid(alpha=0.25)
     body_max = [row["body_max_dose"] for row in rows]
-    axes[2].plot(angles, body_max, color="tab:purple")
+    target_d95 = [row["target_d95_dose"] for row in rows]
+    axes[2].plot(angles, target_d95, label="Target D95", color="tab:green")
+    axes[2].plot(angles, body_max, label="Water-phantom maximum", color="tab:purple")
+    axes[2].axhline(0.50, color="0.6", linestyle=":", linewidth=1,
+                    label="Toy target prescription")
     axes[2].axvline(nominal_angle, color="0.5", linestyle="--", linewidth=1)
     axes[2].set_xlabel("Gantry angle (degrees)")
-    axes[2].set_ylabel("Water-phantom maximum dose")
+    axes[2].set_ylabel("Toy dose")
+    axes[2].legend()
     axes[2].grid(alpha=0.25)
     fig.tight_layout()
     png_path = os.path.join(output_dir, "gantry_scan.png")
@@ -189,7 +243,9 @@ def main():
     converged = sum(row["converged"] for row in rows)
     best = min(rows, key=lambda row: row["optimized_loss"])
     print(f"Objective: {args.objective}")
+    print(f"Spot set: {spot_set} ({initial_weights.size} spots)")
     print(f"Nominal angle: {nominal_angle:.3f} deg")
+    print(f"Nominal solver restarts: {nominal_restarts}")
     print(f"Scan: {len(rows)} points, {angles[0]:.3f} to {angles[-1]:.3f} deg")
     print(f"Nominal optimized loss: {nominal_solution.objective:.9g}")
     print(f"Lowest sampled toy loss angle: {best['gantry_angle_deg']:.3f} deg")
@@ -200,8 +256,11 @@ def main():
     print(f"Water-phantom max dose at sampled best: "
           f"{best['body_max_dose']:.6g}")
     print(f"Stationarity checks passed: {converged}/{len(rows)}")
+    print(f"Points needing solver restarts: "
+          f"{sum(row['restarts'] > 0 for row in rows)}")
     largest_weight = float(np.max(weights))
     print(f"Largest optimized spot weight: {largest_weight:.6g}")
+    print(f"Active spots at sampled best: {best['active_spots']}")
     if largest_weight > 10.0 * float(np.max(nominal_weights)):
         print("WARNING: extreme spot weights in this toy case; this scan is "
               "not a deliverable BAO plan.")

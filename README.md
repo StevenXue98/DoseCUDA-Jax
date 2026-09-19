@@ -128,14 +128,24 @@ boundary-straddling target/OAR case remains available with `--objective
 legacy` for reproducing the original diagnostic. Neither case imposes
 clinical spot deliverability constraints.
 
+The default `covering15` spot set is a fixed 15-spot lattice (one energy ID,
+five lateral x positions, three lateral y positions) covering the interior
+toy target at the nominal angle. It is held unchanged as gantry angle varies;
+only weights are re-optimized. Two additional trial energy layers were
+discarded after all their optimized weights were zero in the 21–25 degree
+diagnostic. The original three-spot gradient-validation
+beam is still available with `--spot-set validation` and is selected
+automatically with `--objective legacy`.
+
 The script rebuilds ray tracing/WET at each angle, compares re-optimized
 weights with nominal weights held fixed, and writes CSV and plots under the
-ignored `test_phantom_output/optimized_gantry_scan/<objective>/` directory.
+ignored `test_phantom_output/optimized_gantry_scan/<objective>/<spot-set>/`
+directory.
 It is a small-phantom workflow diagnostic, not a treatment plan or validated
 BAO objective. Points that do not pass the inner solver's stationarity check
-are marked on the plot. The three-spot validation beam cannot cover this
-interior target adequately; the CSV reports target mean and D95 doses so a
-falling objective is not mistaken for clinically acceptable coverage.
+are marked on the plot. The CSV reports target mean and D95 doses so a falling
+objective is not mistaken for clinically acceptable coverage. The old
+three-spot beam substantially undercovers the interior toy target.
 
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
