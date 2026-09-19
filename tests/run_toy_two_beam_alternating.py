@@ -93,8 +93,16 @@ def weight_block(experiment, angles, weights, iterations):
                        "message": str(result.message)}
 
 
-def gaussian_direction(experiment, angles, weights, *, sigma, pairs, rng):
-    probes = rng.standard_normal((pairs, 2))
+def gaussian_direction(experiment, angles, weights, *, sigma, pairs,
+                       rng=None, probes=None):
+    if probes is None:
+        if rng is None:
+            raise ValueError("rng or explicit probes are required")
+        probes = rng.standard_normal((pairs, 2))
+    else:
+        probes = np.asarray(probes, dtype=np.float64)
+        if probes.shape != (pairs, 2):
+            raise ValueError("probes must have shape (pairs, 2)")
     differences = np.asarray([
         experiment.loss(np.clip(angles + sigma * z, -90, 90), weights)
         - experiment.loss(np.clip(angles - sigma * z, -90, 90), weights)

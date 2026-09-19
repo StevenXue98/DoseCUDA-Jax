@@ -8,6 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_toy_two_beam_alternating import try_angle_move  # noqa: E402
+from compare_toy_two_beam_inner_schedules import shared_probes  # noqa: E402
 
 
 class AngleAcceptanceTests(unittest.TestCase):
@@ -51,6 +52,12 @@ class AngleAcceptanceTests(unittest.TestCase):
             np.asarray([0.0, 0.0]), np.asarray([1.0]), 0.5,
             np.asarray([1.0, 0.0]), 1.0)
         self.assertIsNone(moved)
+
+    def test_same_start_and_cycle_share_probes_across_methods(self):
+        first = shared_probes(17, 1, 2, 8)
+        np.testing.assert_array_equal(first, shared_probes(17, 1, 2, 8))
+        self.assertFalse(np.array_equal(first, shared_probes(17, 1, 3, 8)))
+        self.assertFalse(np.array_equal(first, shared_probes(17, 2, 2, 8)))
 
 
 if __name__ == "__main__":
