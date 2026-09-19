@@ -109,6 +109,21 @@ vector, iteration count, and projected-gradient norm. SciPy controls the
 search on the CPU; CUDA still computes dose and the weight VJP. The existing
 CUDA weight validation checks this path on a two-beam, five-spot case.
 
+To scan one gantry angle with the rounded DoseCUDA forward model while
+re-optimizing spot weights at every sampled angle:
+
+```bash
+python tests/scan_cuda_optimized_gantry.py
+```
+
+The script rebuilds ray tracing/WET at each angle, compares the optimized
+target/OAR loss with the loss from holding nominal weights fixed, and writes
+a CSV and plot to the ignored `test_phantom_output/optimized_gantry_scan/`
+directory. This is a diagnostic on the small toy phantom, not a treatment
+plan: the toy objective does not constrain dose outside its target/OAR masks
+or impose clinically meaningful spot-weight limits. Points that do not pass
+the inner solver's stationarity check are marked on the plot.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 

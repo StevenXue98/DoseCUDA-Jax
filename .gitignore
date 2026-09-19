@@ -11,6 +11,7 @@ test_phantom_output/optimization/
 test_phantom_output/native_gtx1080ti/
 test_phantom_output/noncubic_indexing/
 test_phantom_output/angular_landscape/
+test_phantom_output/optimized_gantry_scan/
 
 # Distribution / packaging
 *.egg-info/
