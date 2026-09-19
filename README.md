@@ -233,6 +233,20 @@ To change search settings without rebuilding the grid, pass
 a global-optimum certificate; fixed-weight probes use the candidate beam
 layout and are not physical setup errors or SAM perturbations.
 
+To view the saved two-angle map as a three-dimensional surface with the exact
+search paths overlaid, without rerunning CUDA:
+
+```bash
+python tests/plot_toy_two_beam_landscape_3d.py
+```
+
+The PNG appears beside the heatmap. Its height is `log10(loss)` so both the
+high-loss ridge and low-loss valleys remain visible. The plotted surface
+connects measured grid points for visualization; intermediate surface values
+are **not** additional dose calculations. The colored path heights are exact
+jointly re-optimized losses. Use `--elev`, `--azim`, and `--output` to save
+other viewing angles.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
