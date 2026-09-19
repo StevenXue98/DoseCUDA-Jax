@@ -562,6 +562,19 @@ For any questions or support regarding DoseCUDA, please reach out via email:
 # Funding Support
 * The Commonwealth Fund
 
+## Patient-anatomy inner-solver scaling benchmark
+
+From the repository root, after activating the Linux project environment, run
+`python -m tests.benchmark_patient_inner_scaling`. It uses the checked-in matRad
+head-and-neck CT and masks, two fixed beams, and nested 56/104/152-spot plans.
+The CUDA dose engine builds a dense influence matrix; the GPU evaluates its
+loss and gradient; CPU SLSQP chooses weights. The script records geometry,
+matrix construction/upload, optimization, convergence, and a fresh DoseCUDA
+loss check under `test_phantom_output/bao_patient_inner_scaling/summary.json`.
+Its normalized target/brainstem/normal-tissue objective and spot layout are
+synthetic: this is a scaling test on patient anatomy, **not** a clinical-plan
+quality benchmark or a like-for-like comparison to matRad timing.
+
 # JAX Implementation
 
 Differentiable implementation of the PB algorithm in Jax.
