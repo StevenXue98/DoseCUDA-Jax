@@ -593,6 +593,21 @@ allows a slower comparison. Results go to ignored
 archive of optimized weights, spots, and full-grid dose). Coverage and OAR
 metrics must be inspected separately from numerical solver convergence.
 
+## Partial inner solves and angle signals
+
+`python -m tests.benchmark_partial_inner_angle` uses the saved prostate
+`summary.npz` as a warm start, moves each of the two beams locally in a
+separate case, and retains each beam's spot positions, energy IDs, and weight
+indices. It compares matrix and matrix-free calls for the **same** five-region
+loss, records 0/1/5/10/20 accepted L-BFGS-B weight iterates, and computes
+fixed-weight central angular secants against a converged-weight reference.
+The matrix build, both partial trajectories, full reference solve, and angle
+probes are timed separately. These secants are not derivatives of the rounded
+DoseCUDA model, and this script does not implement alternating BAO. Output is
+ignored under `test_phantom_output/bao_partial_inner/`; each case also saves
+an `.npz` archive of reference and partial-step weights for subsequent angle
+step experiments.
+
 # JAX Implementation
 
 Differentiable implementation of the PB algorithm in Jax.

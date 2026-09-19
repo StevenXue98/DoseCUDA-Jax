@@ -21,6 +21,7 @@ test_phantom_output/bao_cuda_inner_multistart/
 test_phantom_output/bao_gpu_influence/
 test_phantom_output/bao_patient_inner_scaling/
 test_phantom_output/bao_prostate_nominal/
+test_phantom_output/bao_partial_inner/
 
 # Distribution / packaging
 *.egg-info/
