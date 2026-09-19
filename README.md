@@ -147,6 +147,34 @@ are marked on the plot. The CSV reports target mean and D95 doses so a falling
 objective is not mistaken for clinically acceptable coverage. The old
 three-spot beam substantially undercovers the interior toy target.
 
+For a reproducible **one-beam toy BAO baseline** with an active target/OAR
+tradeoff, run:
+
+```bash
+python tests/run_toy_bao_baseline.py
+```
+
+This evaluates dose on the entire 24 × 28 × 32 grid (21,504 voxels). The
+objective uses all 10,296 water/body voxels: 33 target, 33 OAR, and 10,230
+other normal-tissue voxels. Air voxels are calculated but not penalized. Each
+angle from −90° to 90° in 2° increments receives the same 45-spot,
+three-energy beam's-eye-view lattice, shifted laterally to follow the target,
+and an independently optimized nonnegative spot-weight vector. It reports the
+best sampled angle, the nominal 23° result, and a nominal-angle no-OAR
+ablation. CSV, a landscape plot, a JSON summary, and the selected spot
+weights are saved under the
+ignored `test_phantom_output/bao_toy_baseline/` directory. The inner-solver
+stationarity check is 2e-4, reflecting float32 CUDA dose/gradient noise;
+unresolved angles make the script fail rather than silently claiming an
+exhaustive reference. "Exhaustive" means only exhaustive on this finite
+angle grid and spot layout. The dose units, masks, and limits are synthetic,
+not a clinical plan or an estimate of treatment quality.
+Near the minimum, several neighboring angles are nearly tied; float32 CUDA
+variation can change the exact 2° winner. The JSON reports all angles within
+5% of the run's lowest loss, so the broad minimum is more informative than
+the single best marker. OAR and normal-tissue limits are soft penalties, not
+hard dose constraints.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
