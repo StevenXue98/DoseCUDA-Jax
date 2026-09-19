@@ -9,6 +9,7 @@ target_sources(${MODULE_NAME}
         IMPTClasses.cu
         IMPTWeightGradients.cu
         IMPTWeightOptimizer.cu
+        IMPTInfluenceMatrix.cu
         IMRTClasses.cu
         TextureClasses.cu)
 
@@ -21,4 +22,5 @@ set_target_properties(${MODULE_NAME} PROPERTIES
     CUDA_SEPARABLE_COMPILATION  ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
-target_link_libraries(${MODULE_NAME} PRIVATE Python::NumPy)
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(${MODULE_NAME} PRIVATE Python::NumPy CUDA::cublas)

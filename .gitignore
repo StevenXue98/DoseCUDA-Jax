@@ -18,6 +18,7 @@ test_phantom_output/bao_toy_three_beam/
 test_phantom_output/bao_toy_two_beam*/
 test_phantom_output/bao_cuda_inner_benchmark/
 test_phantom_output/bao_cuda_inner_multistart/
+test_phantom_output/bao_gpu_influence/
 
 # Distribution / packaging
 *.egg-info/

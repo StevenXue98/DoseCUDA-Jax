@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <climits>
 #include <memory>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "IMPTClasses.cuh"
 #include "IMPTWeightGradients.cuh"
 #include "IMPTWeightOptimizer.cuh"
+#include "IMPTInfluenceMatrix.cuh"
 #include "MemoryClasses.h"
 
 
@@ -811,6 +813,122 @@ static PyObject* proton_optimize_spot_weights(PyObject *self, PyObject *args) {
 }
 
 
+static const char *GPU_MATRIX_CAPSULE_NAME = "DoseCUDA.GPUInfluenceMatrix";
+
+static void gpu_matrix_capsule_destroy(PyObject *capsule) {
+	void *pointer = PyCapsule_GetPointer(capsule, GPU_MATRIX_CAPSULE_NAME);
+	if (pointer) delete static_cast<GPUInfluenceMatrix *>(pointer);
+	else PyErr_Clear();
+}
+
+
+static PyObject *proton_gpu_matrix_create(PyObject *self, PyObject *args) {
+	PyObject *matrix_object, *target_object, *oar_object, *normal_object;
+	double prescription, oar_limit, normal_limit, oar_weight, normal_weight;
+	int gpu_id;
+	if (!PyArg_ParseTuple(args, "OOOOdddddi", &matrix_object, &target_object,
+	    &oar_object, &normal_object, &prescription, &oar_limit, &normal_limit,
+	    &oar_weight, &normal_weight, &gpu_id)) return NULL;
+	if (!PyArray_Check(matrix_object)) {
+		PyErr_SetString(PyExc_TypeError, "matrix must be a NumPy array");
+		return NULL;
+	}
+	auto *matrix = reinterpret_cast<PyArrayObject *>(matrix_object);
+	if (!pyarray_typecheck(matrix, 2, NPY_DOUBLE)
+	    || !PyArray_IS_C_CONTIGUOUS(matrix)
+	    || PyArray_DIM(matrix, 0) <= 0 || PyArray_DIM(matrix, 1) <= 0
+	    || PyArray_DIM(matrix, 0) > INT_MAX || PyArray_DIM(matrix, 1) > INT_MAX) {
+		PyErr_SetString(PyExc_ValueError,
+			"matrix must be nonempty, contiguous float64 (voxels, spots)");
+		return NULL;
+	}
+	PyObject *mask_objects[3] = {target_object, oar_object, normal_object};
+	PyArrayObject *masks[3];
+	for (int i = 0; i < 3; ++i) {
+		if (!PyArray_Check(mask_objects[i])) {
+			PyErr_SetString(PyExc_TypeError, "masks must be NumPy arrays");
+			return NULL;
+		}
+		masks[i] = reinterpret_cast<PyArrayObject *>(mask_objects[i]);
+		if (!pyarray_typecheck(masks[i], 1, NPY_UBYTE)
+		    || !PyArray_IS_C_CONTIGUOUS(masks[i])
+		    || PyArray_DIM(masks[i], 0) != PyArray_DIM(matrix, 0)) {
+			PyErr_SetString(PyExc_ValueError,
+				"masks must be contiguous uint8 vectors matching matrix voxels");
+			return NULL;
+		}
+	}
+	try {
+		std::unique_ptr<GPUInfluenceMatrix> context(new GPUInfluenceMatrix(
+			gpu_id, pyarray_as<double>(matrix),
+			static_cast<int>(PyArray_DIM(matrix, 0)),
+			static_cast<int>(PyArray_DIM(matrix, 1)),
+			pyarray_as<unsigned char>(masks[0]),
+			pyarray_as<unsigned char>(masks[1]),
+			pyarray_as<unsigned char>(masks[2]), prescription, oar_limit,
+			normal_limit, oar_weight, normal_weight));
+		PyObject *capsule = PyCapsule_New(context.get(),
+			GPU_MATRIX_CAPSULE_NAME, gpu_matrix_capsule_destroy);
+		if (capsule) context.release();
+		return capsule;
+	} catch (std::bad_alloc &) {
+		PyErr_SetString(PyExc_MemoryError, "GPU matrix allocation failed");
+	} catch (std::invalid_argument &error) {
+		PyErr_SetString(PyExc_ValueError, error.what());
+	} catch (std::runtime_error &error) {
+		PyErr_Format(PyExc_RuntimeError, "GPU matrix: %s", error.what());
+	}
+	return NULL;
+}
+
+
+static PyObject *proton_gpu_matrix_evaluate(PyObject *self, PyObject *args) {
+	PyObject *capsule, *weights_object;
+	int return_dose = 0;
+	if (!PyArg_ParseTuple(args, "OO|p", &capsule, &weights_object,
+	    &return_dose)) return NULL;
+	auto *context = static_cast<GPUInfluenceMatrix *>(
+		PyCapsule_GetPointer(capsule, GPU_MATRIX_CAPSULE_NAME));
+	if (!context) return NULL;
+	if (!PyArray_Check(weights_object)) {
+		PyErr_SetString(PyExc_TypeError, "weights must be a NumPy array");
+		return NULL;
+	}
+	auto *weights = reinterpret_cast<PyArrayObject *>(weights_object);
+	if (!pyarray_typecheck(weights, 1, NPY_DOUBLE)
+	    || !PyArray_IS_C_CONTIGUOUS(weights)
+	    || PyArray_DIM(weights, 0) != context->spot_count()) {
+		PyErr_SetString(PyExc_ValueError,
+			"weights must be contiguous float64 matching matrix spots");
+		return NULL;
+	}
+	npy_intp gradient_shape[1] = {context->spot_count()};
+	PyObject *gradient = PyArray_SimpleNew(1, gradient_shape, NPY_DOUBLE);
+	if (!gradient) return NULL;
+	PyObject *dose = NULL;
+	if (return_dose) {
+		npy_intp dose_shape[1] = {context->voxel_count()};
+		dose = PyArray_SimpleNew(1, dose_shape, NPY_DOUBLE);
+		if (!dose) { Py_DECREF(gradient); return NULL; }
+	}
+	try {
+		const double objective = context->value_and_gradient(
+			pyarray_as<double>(weights),
+			pyarray_as<double>(reinterpret_cast<PyArrayObject *>(gradient)),
+			dose ? pyarray_as<double>(reinterpret_cast<PyArrayObject *>(dose)) : NULL);
+		if (dose) return Py_BuildValue("{s:d,s:N,s:N}", "objective", objective,
+			"gradient", gradient, "dose", dose);
+		return Py_BuildValue("{s:d,s:N}", "objective", objective,
+			"gradient", gradient);
+	} catch (std::runtime_error &error) {
+		PyErr_Format(PyExc_RuntimeError, "GPU matrix evaluation: %s", error.what());
+	}
+	Py_DECREF(gradient);
+	Py_XDECREF(dose);
+	return NULL;
+}
+
+
 static PyObject * photon_dose(PyObject* self, PyObject* args) {
 
 	PyObject *model_instance, *volume_instance, *cp_instance;
@@ -1018,6 +1136,18 @@ static PyMethodDef DoseMethods[] = {
 		proton_optimize_spot_weights,
 		METH_VARARGS,
 		"Experimental matrix-free float32 GPU spot-weight solve."
+	},
+	{
+		"proton_gpu_matrix_create",
+		proton_gpu_matrix_create,
+		METH_VARARGS,
+		"Upload fixed-angle dose columns for GPU-resident matrix products."
+	},
+	{
+		"proton_gpu_matrix_evaluate",
+		proton_gpu_matrix_evaluate,
+		METH_VARARGS,
+		"Compute dose objective and weight gradient using a resident GPU matrix."
 	},
 	{
 		"photon_dose_cuda",

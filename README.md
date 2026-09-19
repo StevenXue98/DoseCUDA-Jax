@@ -320,6 +320,26 @@ small loss/line-search scalars with the host; this is not a zero-transfer
 implementation. Use `--output` to save a JSON benchmark record under an
 ignored output directory.
 
+For a parallel **GPU-resident influence-matrix** inner solve and complete
+cold/warm comparison, run:
+
+```bash
+python -m unittest discover -s tests -p test_gpu_influence_matrix.py
+python tests/benchmark_gpu_influence_inner.py
+```
+
+`DoseCUDA.gpu_influence_matrix.solve_gpu_influence_weights` builds one
+unit-spot dose column per spot with the unchanged DoseCUDA forward model,
+uploads the fixed-angle matrix once, and uses float64 cuBLAS products for
+`D @ weights` and `D.T @ dose_gradient`. SciPy SLSQP still controls the
+small weight vector on the CPU; only that vector, its gradient, and the loss
+cross the CPU/GPU boundary per callback. This is intentionally separate from
+the matrix-free path. The benchmark counts geometry/WET setup, column build,
+GPU upload, and solve time, checks the final loss with fresh DoseCUDA dose,
+and compares against the existing accurate CPU matrix reference. The dense
+matrix is suitable for this small synthetic case; memory and construction
+cost must be reassessed for realistic voxel/spot counts.
+
 To compare the earlier nominal continuous two-angle searches on the exploratory
 map, run:
 
