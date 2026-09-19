@@ -608,6 +608,23 @@ ignored under `test_phantom_output/bao_partial_inner/`; each case also saves
 an `.npz` archive of reference and partial-step weights for subsequent angle
 step experiments.
 
+## Alternating two-beam toy BAO
+
+Run `python tests/run_toy_two_beam_alternating.py` from the activated project
+environment. This uses the same full-voxel, 90-spot toy objective and the
+previously computed accurate 2° pair grid. At fixed angles, matrix-free CUDA
+forward/VJP calls take bounded L-BFGS-B spot-weight steps. A Gaussian angle
+direction proposes moves, but an angle is accepted only if a fresh unsmoothed
+DoseCUDA evaluation lowers the loss **with those same weights**. The adaptive
+schedule tries 20 weight steps first, then continues to 50 and 100 at the
+same angles if no proposed move passes that exact-loss check. Fixed 20- and
+100-step schedules provide context from the same three starts. Only after a
+run ends is its weight vector fully reoptimized with the small-case influence
+matrix, for comparison to the existing grid; that matrix is not used inside
+the alternating loop. Results and path/cost plots are written to ignored
+`test_phantom_output/bao_toy_two_beam_alternating/`. This is an exploratory
+nonconvex toy search, not a globally optimal or clinically validated plan.
+
 # JAX Implementation
 
 Differentiable implementation of the PB algorithm in Jax.
