@@ -175,6 +175,27 @@ variation can change the exact 2° winner. The JSON reports all angles within
 the single best marker. OAR and normal-tissue limits are soft penalties, not
 hard dose constraints.
 
+To test an actual multistart *angle search* against that finite-grid answer
+key, run the baseline above and then:
+
+```bash
+python tests/run_toy_bao_gaussian.py
+```
+
+The default starts are −20°, 23°, and 75°. At each step, eight antithetic
+Gaussian perturbation pairs (2° standard deviation) estimate a direction
+while holding the current optimized spot weights fixed. The candidate spot
+lattice follows the target as the nominal angle changes; this is a search
+parameterization, **not** a physical delivery-error scenario or SAM. A
+backtracked angle move is accepted only after re-optimizing its weights and
+checking that the *unsmoothed* DoseCUDA loss falls by more than 1e-5. The
+ignored `test_phantom_output/bao_toy_gaussian/` directory contains a plot,
+per-start histories, exact trial losses, call counts, and the winning weights.
+This is a safeguarded heuristic, not a gradient of the bilevel loss and not a
+global-optimum guarantee. In particular, a 4° smoothing scale can point
+opposite the re-optimized loss slope around 35° and stop that start early;
+`--sigma 4` reproduces the sensitivity check.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
