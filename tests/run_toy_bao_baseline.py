@@ -102,15 +102,20 @@ def projected_spot_x(angle, grid, beam):
     return -rotated_x * np.cos(gantry) - relative[1] * np.sin(gantry)
 
 
-def make_operator(angle, grid, plan, base_beam):
-    angle_plan = copy(plan)
+def make_angle_beam(angle, grid, base_beam):
+    """Create a target-centered candidate beam using the toy scan convention."""
     angle_beam = deepcopy(base_beam)
     angle_beam.gantry_angle = float(angle)
     angle_beam.spot_list[:, 0] += np.float32(
         projected_spot_x(angle, grid, base_beam)
         - projected_spot_x(NOMINAL_ANGLE, grid, base_beam)
     )
-    angle_plan.beam_list = [angle_beam]
+    return angle_beam
+
+
+def make_operator(angle, grid, plan, base_beam):
+    angle_plan = copy(plan)
+    angle_plan.beam_list = [make_angle_beam(angle, grid, base_beam)]
     return FixedGeometryPlanDose(grid, angle_plan)
 
 

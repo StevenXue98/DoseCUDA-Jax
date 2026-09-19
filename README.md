@@ -196,6 +196,24 @@ global-optimum guarantee. In particular, a 4° smoothing scale can point
 opposite the re-optimized loss slope around 35° and stop that start early;
 `--sigma 4` reproduces the sensitivity check.
 
+To test whether the same toy objective benefits from **jointly optimized
+three-beam weights** before searching over three angles, run:
+
+```bash
+python tests/run_toy_three_beam_joint.py
+```
+
+This freezes three representative angle triples and solves all one-, two-,
+and three-beam subsets with the same 45 candidate spots per beam and the
+same full-water-phantom objective. All spot weights in each subset are
+optimized together; no separate beam-share variables are introduced. The
+ignored `test_phantom_output/bao_toy_three_beam/` directory contains the
+subset losses, joint target D95 and OAR dose, per-beam target-dose shares,
+active-spot counts, solver costs, a comparison plot, and the joint weights.
+The experiment checks that adding an available beam does not worsen the
+optimized loss beyond float32 solver variation. These are fixed-angle toy
+plans, not a three-angle BAO search or a clinical treatment plan.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
