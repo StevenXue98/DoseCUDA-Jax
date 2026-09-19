@@ -257,6 +257,89 @@ class ProjectedGradientResult:
     converged: bool
 
 
+@dataclass(frozen=True)
+class BoundedLBFGSBResult:
+    weights: np.ndarray
+    objective: float
+    iterations: int
+    evaluations: int
+    projected_gradient_norm: float
+    converged: bool
+    message: str
+
+
+def bounded_lbfgsb(
+    value_and_gradient: ValueAndWeightGradient,
+    initial_weights,
+    *,
+    max_iterations=1000,
+    gradient_tolerance=1.0e-6,
+    stationarity_tolerance=1.0e-4,
+    relative_tolerance=1.0e-12,
+) -> BoundedLBFGSBResult:
+    """Optimize nonnegative spot weights using a dose/VJP callback.
+
+    SciPy chooses trial weights on the CPU. The supplied callback may use CUDA
+    for dose and weight gradients; no dose-influence matrix is constructed.
+    ``gradient_tolerance`` controls SciPy's search; the looser
+    ``stationarity_tolerance`` checks the returned float32 CUDA weights.
+    ``converged`` requires that projected-gradient check, not just SciPy's
+    relative-objective stopping condition.
+    """
+    from scipy.optimize import minimize
+
+    weights = np.asarray(initial_weights, dtype=np.float64)
+    if weights.ndim != 1 or weights.size == 0 or not np.all(np.isfinite(weights)):
+        raise ValueError("initial_weights must be a nonempty finite 1D array")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be positive")
+    tolerances = np.asarray(
+        (gradient_tolerance, stationarity_tolerance, relative_tolerance),
+        dtype=np.float64,
+    )
+    if not np.all(np.isfinite(tolerances)) or np.any(tolerances <= 0):
+        raise ValueError("optimizer tolerances must be positive")
+    weights = np.maximum(weights, 0.0)
+
+    def checked_value_and_gradient(trial):
+        value, gradient = value_and_gradient(trial)
+        value = float(value)
+        gradient = np.asarray(gradient, dtype=np.float64)
+        if not np.isfinite(value):
+            raise ValueError("objective must be finite")
+        if gradient.shape != weights.shape or not np.all(np.isfinite(gradient)):
+            raise ValueError("weight gradient must be finite and match weights")
+        return value, gradient
+
+    result = minimize(
+        checked_value_and_gradient,
+        weights,
+        method="L-BFGS-B",
+        jac=True,
+        bounds=[(0.0, None)] * weights.size,
+        options={
+            "maxiter": int(max_iterations),
+            "gtol": float(gradient_tolerance),
+            "ftol": float(relative_tolerance),
+        },
+    )
+    final_weights = np.maximum(result.x, 0.0).astype(np.float32)
+    final_value, final_gradient = checked_value_and_gradient(final_weights)
+    projected_gradient = final_weights - np.maximum(
+        final_weights - final_gradient, 0.0
+    )
+    projected_norm = float(np.linalg.norm(projected_gradient, ord=np.inf))
+    return BoundedLBFGSBResult(
+        weights=final_weights,
+        objective=final_value,
+        iterations=int(result.nit),
+        evaluations=int(result.nfev) + 1,
+        projected_gradient_norm=projected_norm,
+        converged=bool(result.success and projected_norm <= stationarity_tolerance),
+        message=str(result.message),
+    )
+
+
 def projected_gradient_descent(
     value_and_gradient: ValueAndWeightGradient,
     initial_weights,

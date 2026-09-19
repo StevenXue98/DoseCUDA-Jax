@@ -14,6 +14,7 @@ from DoseCUDA import IMPTBeam  # noqa: E402
 from DoseCUDA.impt_weight_optimization import (  # noqa: E402
     FixedGeometryBeamDose,
     FixedGeometryPlanDose,
+    bounded_lbfgsb,
     projected_gradient_descent,
 )
 from validate_spot_weight_gradients import create_case  # noqa: E402
@@ -109,6 +110,26 @@ def main():
         plan_weights,
     )
 
+    # Exercise the reusable bounded solver on concatenated weights from two
+    # beams. The known target dose is synthetic, so this checks optimization
+    # plumbing rather than treatment-plan quality.
+    known_plan_weights = np.asarray(
+        (1.15, 0.45, 0.90, 0.70, 0.35), dtype=np.float32
+    )
+    known_plan_dose = plan_operator.dose(known_plan_weights)
+    plan_dose_scale = max(float(np.mean(known_plan_dose**2)), 1.0e-12)
+
+    def plan_quadratic_loss(dose):
+        residual = dose - known_plan_dose
+        value = 0.5 * float(np.mean(residual**2)) / plan_dose_scale
+        dose_gradient = residual / np.float32(residual.size * plan_dose_scale)
+        return value, np.ascontiguousarray(dose_gradient, dtype=np.float32)
+
+    bounded_plan = bounded_lbfgsb(
+        lambda trial: plan_operator.value_and_gradient(trial, plan_quadratic_loss),
+        plan_weights,
+    )
+
     linear_scale = np.maximum(np.abs(linear_fd), 1.0e-10)
     quadratic_scale = np.maximum(np.abs(quadratic_fd), 1.0e-10)
     linear_relative_error = np.abs(linear_gradient - linear_fd) / linear_scale
@@ -142,6 +163,9 @@ def main():
     print(f"two-beam CUDA VJP: {plan_gradient.tolist()}")
     print(f"two-beam finite difference: {plan_fd.tolist()}")
     print(f"max two-beam relative error: {plan_relative_error.max():.6g}")
+    print(f"two-beam bounded objective: {bounded_plan.objective:.9g}")
+    print(f"two-beam bounded converged: {bounded_plan.converged}")
+    print(f"two-beam bounded weights: {bounded_plan.weights.tolist()}")
 
     failures = []
     if linear_relative_error.max() > 3.0e-3:
@@ -154,6 +178,8 @@ def main():
         failures.append("projected optimization did not recover the target weights")
     if plan_relative_error.max() > 3.0e-3:
         failures.append("multi-beam CUDA VJP disagrees with finite differences")
+    if bounded_plan.objective > 1.0e-6 or not bounded_plan.converged:
+        failures.append("two-beam bounded optimization did not recover target dose")
     if failures:
         raise SystemExit("CUDA spot-weight validation failed:\n- " + "\n- ".join(failures))
 

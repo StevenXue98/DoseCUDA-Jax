@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from DoseCUDA.impt_weight_optimization import (
+    bounded_lbfgsb,
     make_target_oar_loss,
     projected_gradient_descent,
 )
@@ -70,6 +71,27 @@ class TargetOARLossTests(unittest.TestCase):
         )
         self.assertEqual(result.iterations, 1)
         self.assertFalse(result.converged)
+
+    def test_bounded_solver_and_warm_start(self):
+        target = np.asarray((1.0, -1.0), dtype=np.float64)
+
+        def objective(weights):
+            residual = weights - target
+            return 0.5 * float(np.dot(residual, residual)), residual
+
+        result = bounded_lbfgsb(objective, np.asarray((0.0, 2.0)))
+        self.assertTrue(result.converged)
+        np.testing.assert_allclose(result.weights, (1.0, 0.0), atol=1.0e-6)
+        self.assertAlmostEqual(result.objective, 0.5)
+        self.assertLess(result.projected_gradient_norm, 1.0e-6)
+
+        warm_start = bounded_lbfgsb(objective, result.weights)
+        self.assertTrue(warm_start.converged)
+        np.testing.assert_allclose(warm_start.weights, result.weights)
+
+    def test_bounded_solver_rejects_bad_gradient(self):
+        with self.assertRaisesRegex(ValueError, "weight gradient"):
+            bounded_lbfgsb(lambda weights: (1.0, np.zeros(2)), [1.0])
 
 
 if __name__ == "__main__":

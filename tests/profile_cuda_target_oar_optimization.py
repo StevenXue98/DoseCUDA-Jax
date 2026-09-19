@@ -18,6 +18,7 @@ sys.path.insert(0, REPOSITORY_ROOT)
 
 from DoseCUDA.impt_weight_optimization import (  # noqa: E402
     FixedGeometryBeamDose,
+    bounded_lbfgsb,
     make_target_oar_loss,
     projected_gradient_descent,
 )
@@ -184,15 +185,14 @@ def main():
     reference_cuda_value = loss(reference_dose)[0]
     np.testing.assert_allclose(reference.fun, reference_cuda_value, atol=1.0e-6)
 
-    cuda_lbfgsb = minimize(
+    cuda_lbfgsb = bounded_lbfgsb(
         lambda weights: operator.value_and_gradient(weights, loss),
-        initial_weights.astype(np.float64),
-        jac=True,
-        bounds=[(0.0, None)] * operator.n_spots,
-        method="L-BFGS-B",
-        options={"ftol": 1.0e-12, "gtol": 1.0e-6, "maxiter": 1000},
+        initial_weights,
+        relative_tolerance=1.0e-12,
+        gradient_tolerance=1.0e-6,
+        stationarity_tolerance=1.0e-4,
     )
-    cuda_lbfgsb_value = loss(operator.dose(cuda_lbfgsb.x.astype(np.float32)))[0]
+    cuda_lbfgsb_value = cuda_lbfgsb.objective
 
     refined = projected_gradient_descent(
         lambda weights: operator.value_and_gradient(weights, loss),
@@ -212,8 +212,10 @@ def main():
     print(f"50-step objective gap: {result.objective_history[-1] - reference.fun:.6g}")
     print(f"CUDA bounded solve: {cuda_lbfgsb_value:.9g}; "
           f"gap: {cuda_lbfgsb_value - reference.fun:.6g}; "
-          f"success: {cuda_lbfgsb.success}")
-    print(f"CUDA bounded weights: {cuda_lbfgsb.x.tolist()}")
+          f"converged: {cuda_lbfgsb.converged}; "
+          f"projected-gradient norm: "
+          f"{cuda_lbfgsb.projected_gradient_norm:.6g}")
+    print(f"CUDA bounded weights: {cuda_lbfgsb.weights.tolist()}")
     print(f"refined CUDA objective: {refined_value:.9g}; "
           f"gap: {refined_value - reference.fun:.6g}")
     print(f"refined CUDA iterations: {refined.iterations}; "
@@ -231,6 +233,8 @@ def main():
         raise SystemExit("CUDA weight solve remains above independent optimum")
     if cuda_lbfgsb_value - reference.fun > 1.0e-4:
         raise SystemExit("CUDA bounded solve remains above independent optimum")
+    if not cuda_lbfgsb.converged:
+        raise SystemExit("CUDA bounded solve did not meet stationarity tolerance")
 
 
 if __name__ == "__main__":

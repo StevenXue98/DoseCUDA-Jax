@@ -101,6 +101,14 @@ The matrix is only a validation oracle, not the production dose path. The masks
 and dose limits are toy inputs, not a clinical prescription or validated
 treatment plan.
 
+For subsequent fixed-angle weight solves, `bounded_lbfgsb` accepts any
+`value_and_gradient(weights)` callback, including
+`FixedGeometryPlanDose.value_and_gradient(weights, loss)`. It supports a warm
+start by passing the previous weight vector and returns the objective, weight
+vector, iteration count, and projected-gradient norm. SciPy controls the
+search on the CPU; CUDA still computes dose and the weight VJP. The existing
+CUDA weight validation checks this path on a two-beam, five-spot case.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 

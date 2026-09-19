@@ -4,6 +4,7 @@
 # project's broad jax[cuda12] dependency would otherwise resolve to whatever
 # the newest JAX release is at installation time.
 numpy==1.26.4
+scipy==1.15.3
 jax[cuda12]==0.5.2
 optax==0.2.4
 pydicom==3.0.1
