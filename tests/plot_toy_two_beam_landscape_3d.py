@@ -37,7 +37,10 @@ def main():
     args = parse_args()
     with open(os.path.join(args.input_dir, "summary.json"), encoding="utf-8") as handle:
         summary = json.load(handle)
-    with open(os.path.join(args.input_dir, "coarse_angle_pairs.csv"), newline="",
+    grid_csv = os.path.join(args.input_dir, "angle_pairs.csv")
+    if not os.path.exists(grid_csv):
+        grid_csv = os.path.join(args.input_dir, "coarse_angle_pairs.csv")
+    with open(grid_csv, newline="",
               encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     count = round(180.0 / summary["grid_step_deg"]) + 1
@@ -85,7 +88,7 @@ def main():
     best = summary["grid_best"]
     axis.scatter(*best["angles_deg"], np.log10(best["loss"]),
                  color="red", marker="*", s=180, edgecolor="white",
-                 depthshade=False, label="Coarse-grid minimum", zorder=12)
+                 depthshade=False, label="Sampled-grid minimum", zorder=12)
     axis.set(xlim=(-90, 90), ylim=(-90, 90),
              xlabel="Gantry angle 1 (degrees)",
              ylabel="Gantry angle 2 (degrees)",

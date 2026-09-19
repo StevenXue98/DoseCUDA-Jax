@@ -247,6 +247,24 @@ are **not** additional dose calculations. The colored path heights are exact
 jointly re-optimized losses. Use `--elev`, `--azim`, and `--output` to save
 other viewing angles.
 
+For a finer, **reference-only** scan of the same two-beam toy case, run:
+
+```bash
+python tests/compute_toy_two_beam_reference.py
+python tests/plot_toy_two_beam_landscape_3d.py \
+  --input-dir test_phantom_output/bao_toy_two_beam_2deg
+```
+
+The first command solves the coupled 90-weight inner problem at every one of
+the 4,186 unique unordered pairs on a 2° grid. It does **not** rerun the
+outer angle search: the existing search paths are only overlaid on its new
+2D and 3D plots. The fine CSV, plots, and JSON summary are saved in the
+ignored `test_phantom_output/bao_toy_two_beam_2deg/` directory, leaving the
+10° results untouched. An atomic `reference_checkpoint.json` is written
+every ten pairs; rerunning the same command resumes an interrupted scan.
+The minimum is a sampled-grid reference, not a continuous global-optimum
+certificate.
+
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
 
