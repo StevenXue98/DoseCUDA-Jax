@@ -7,11 +7,54 @@ import numpy as np
 from DoseCUDA.impt_weight_optimization import (
     bounded_lbfgsb,
     make_target_oar_loss,
+    make_target_oar_normal_tissue_loss,
     projected_gradient_descent,
 )
 
 
 class TargetOARLossTests(unittest.TestCase):
+    def test_normal_tissue_overdose_value_and_gradient(self):
+        target = np.zeros((2, 2, 2), dtype=bool)
+        oar = np.zeros_like(target)
+        normal = np.zeros_like(target)
+        target[0, 0, 0] = True
+        oar[0, 0, 1] = True
+        normal[0, 1, 0] = True
+        loss = make_target_oar_normal_tissue_loss(
+            target, 2.0, oar, 1.0, normal, 2.0
+        )
+        dose = np.zeros(target.shape, dtype=np.float32)
+        dose[0, 0, 0] = 1.0
+        dose[0, 0, 1] = 2.0
+        dose[0, 1, 0] = 3.0
+        value, gradient = loss(dose)
+        self.assertAlmostEqual(value, 0.75)
+        np.testing.assert_allclose(
+            gradient[[0, 0, 0], [0, 0, 1], [0, 1, 0]],
+            [-0.5, 0.5, 0.5],
+        )
+        self.assertEqual(np.count_nonzero(gradient), 3)
+
+        step = np.float32(1.0e-3)
+        for index in ((0, 0, 0), (0, 0, 1), (0, 1, 0)):
+            plus, minus = dose.copy(), dose.copy()
+            plus[index] += step
+            minus[index] -= step
+            finite_difference = (loss(plus)[0] - loss(minus)[0]) / (2.0 * step)
+            self.assertAlmostEqual(
+                float(gradient[index]), float(finite_difference), delta=2.0e-4
+            )
+
+    def test_normal_tissue_mask_must_not_overlap(self):
+        target = np.zeros((2, 2, 2), dtype=bool)
+        oar = np.zeros_like(target)
+        target[0, 0, 0] = True
+        oar[0, 0, 1] = True
+        with self.assertRaisesRegex(ValueError, "must exclude target and OAR"):
+            make_target_oar_normal_tissue_loss(
+                target, 2.0, oar, 1.0, target, 2.0
+            )
+
     def test_value_and_gradient(self):
         target = np.zeros((2, 2, 2), dtype=bool)
         oar = np.zeros_like(target)

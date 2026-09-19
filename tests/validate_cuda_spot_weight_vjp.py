@@ -15,6 +15,7 @@ from DoseCUDA.impt_weight_optimization import (  # noqa: E402
     FixedGeometryBeamDose,
     FixedGeometryPlanDose,
     bounded_lbfgsb,
+    make_target_oar_normal_tissue_loss,
     projected_gradient_descent,
 )
 from validate_spot_weight_gradients import create_case  # noqa: E402
@@ -84,6 +85,20 @@ def main():
         weights,
     )
 
+    z, y, x = np.ogrid[: grid.HU.shape[0], : grid.HU.shape[1], : grid.HU.shape[2]]
+    target_mask = (z - 15) ** 2 + (y - 20) ** 2 + (x - 7) ** 2 <= 2**2
+    oar_mask = (z - 10) ** 2 + (y - 20) ** 2 + (x - 13) ** 2 <= 2**2
+    normal_mask = (grid.HU > -500.0) & ~target_mask & ~oar_mask
+    three_structure_loss = make_target_oar_normal_tissue_loss(
+        target_mask, 0.50, oar_mask, 0.30, normal_mask, 0.50,
+    )
+    _, three_structure_gradient = operator.value_and_gradient(
+        weights, three_structure_loss
+    )
+    three_structure_fd = central_difference(
+        lambda trial: three_structure_loss(operator.dose(trial))[0], weights
+    )
+
     initial_weights = np.asarray((0.30, 1.20, 0.25), dtype=np.float32)
     optimization = projected_gradient_descent(
         lambda trial: operator.value_and_gradient(trial, quadratic_loss),
@@ -136,6 +151,14 @@ def main():
     quadratic_relative_error = (
         np.abs(quadratic_gradient - quadratic_fd) / quadratic_scale
     )
+    three_structure_scale = np.maximum(np.abs(three_structure_fd), 1.0e-8)
+    three_structure_relative_error = (
+        np.abs(three_structure_gradient - three_structure_fd)
+        / three_structure_scale
+    )
+    three_structure_absolute_error = np.abs(
+        three_structure_gradient - three_structure_fd
+    )
     target_weight_error = float(
         np.max(np.abs(optimization.weights - target_weights))
     )
@@ -151,6 +174,12 @@ def main():
     print(f"CUDA quadratic gradient: {quadratic_gradient.tolist()}")
     print(f"quadratic finite difference: {quadratic_fd.tolist()}")
     print(f"max quadratic relative error: {quadratic_relative_error.max():.6g}")
+    print(f"three-structure CUDA gradient: {three_structure_gradient.tolist()}")
+    print(f"three-structure finite difference: {three_structure_fd.tolist()}")
+    print(f"max three-structure relative error: "
+          f"{three_structure_relative_error.max():.6g}")
+    print(f"max three-structure absolute error: "
+          f"{three_structure_absolute_error.max():.6g}")
     print(f"optimizer iterations: {optimization.iterations}")
     print(f"optimizer converged: {optimization.converged}")
     print(f"initial objective: {optimization.objective_history[0]:.9g}")
@@ -172,6 +201,10 @@ def main():
         failures.append("CUDA linear VJP disagrees with central finite differences")
     if quadratic_relative_error.max() > 3.0e-3:
         failures.append("CUDA quadratic chain rule disagrees with finite differences")
+    if not np.allclose(
+        three_structure_gradient, three_structure_fd, rtol=3.0e-3, atol=3.0e-5
+    ):
+        failures.append("three-structure CUDA gradient disagrees with finite differences")
     if optimization.objective_history[-1] > 1.0e-7:
         failures.append("projected optimization did not recover the target dose")
     if target_weight_error > 2.0e-3:

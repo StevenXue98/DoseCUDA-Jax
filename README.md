@@ -116,13 +116,26 @@ re-optimizing spot weights at every sampled angle:
 python tests/scan_cuda_optimized_gantry.py
 ```
 
-The script rebuilds ray tracing/WET at each angle, compares the optimized
-target/OAR loss with the loss from holding nominal weights fixed, and writes
-a CSV and plot to the ignored `test_phantom_output/optimized_gantry_scan/`
-directory. This is a diagnostic on the small toy phantom, not a treatment
-plan: the toy objective does not constrain dose outside its target/OAR masks
-or impose clinically meaningful spot-weight limits. Points that do not pass
-the inner solver's stationarity check are marked on the plot.
+The default `three-structure` objective uses fully interior target and OAR
+masks plus the remaining water phantom as normal tissue. It adds mean squared
+target deviation and one-sided squared overdose penalties for OAR and normal
+tissue, following the standard objective *form* used in
+[matRad](https://matrad.readthedocs.io/en/latest/guide/planopt.html). For this
+synthetic case, the target prescription is 0.50, the OAR limit is 0.30, the
+normal-tissue limit is 0.50, and the three normalized term weights are 1.0.
+These values are toy dose units, **not clinical prescriptions**. The old
+boundary-straddling target/OAR case remains available with `--objective
+legacy` for reproducing the original diagnostic. Neither case imposes
+clinical spot deliverability constraints.
+
+The script rebuilds ray tracing/WET at each angle, compares re-optimized
+weights with nominal weights held fixed, and writes CSV and plots under the
+ignored `test_phantom_output/optimized_gantry_scan/<objective>/` directory.
+It is a small-phantom workflow diagnostic, not a treatment plan or validated
+BAO objective. Points that do not pass the inner solver's stationarity check
+are marked on the plot. The three-spot validation beam cannot cover this
+interior target adequately; the CSV reports target mean and D95 doses so a
+falling objective is not mistaken for clinically acceptable coverage.
 
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:

@@ -3,7 +3,8 @@
 
 This is a toy BAO landscape diagnostic, not a clinical plan or an angle
 optimization algorithm. Every point gets fresh ray tracing/WET and starts its
-weight solve from the same nominal-angle optimum.
+weight solve from the same nominal-angle optimum. The default objective uses
+fully interior target/OAR masks and penalizes normal-tissue overdose.
 """
 
 import argparse
@@ -26,6 +27,7 @@ from DoseCUDA.impt_weight_optimization import (  # noqa: E402
     FixedGeometryPlanDose,
     bounded_lbfgsb,
     make_target_oar_loss,
+    make_target_oar_normal_tissue_loss,
 )
 from validate_spot_weight_gradients import create_case  # noqa: E402
 
@@ -35,10 +37,13 @@ def parse_args():
     parser.add_argument("--half-width", type=float, default=2.0)
     parser.add_argument("--step", type=float, default=0.1)
     parser.add_argument(
+        "--objective", choices=("three-structure", "legacy"),
+        default="three-structure",
+        help="research-style target/OAR/normal-tissue objective or old toy loss",
+    )
+    parser.add_argument(
         "--output-dir",
-        default=os.path.join(
-            REPOSITORY_ROOT, "test_phantom_output", "optimized_gantry_scan"
-        ),
+        default=None,
     )
     return parser.parse_args()
 
@@ -61,9 +66,28 @@ def main():
     if shape != (24, 28, 32):
         raise ValueError("toy masks require the 24 x 28 x 32 validation grid")
     z, y, x = np.ogrid[: shape[0], : shape[1], : shape[2]]
-    target_mask = (z - 15) ** 2 + (y - 25) ** 2 + (x - 7) ** 2 <= 2**2
-    oar_mask = (z - 10) ** 2 + (y - 25) ** 2 + (x - 13) ** 2 <= 2**2
-    loss = make_target_oar_loss(target_mask, 0.50, oar_mask, 0.30, 0.25)
+    if args.objective == "legacy":
+        target_y = oar_y = 25
+    else:
+        target_y = oar_y = 20
+    target_mask = (z - 15) ** 2 + (y - target_y) ** 2 + (x - 7) ** 2 <= 2**2
+    oar_mask = (z - 10) ** 2 + (y - oar_y) ** 2 + (x - 13) ** 2 <= 2**2
+    body_mask = np.asarray(grid.HU) > -500.0
+    if args.objective == "legacy":
+        loss = make_target_oar_loss(target_mask, 0.50, oar_mask, 0.30, 0.25)
+    else:
+        if not np.all(body_mask[target_mask]) or not np.all(body_mask[oar_mask]):
+            raise ValueError("three-structure target and OAR must lie within water")
+        normal_tissue_mask = body_mask & ~target_mask & ~oar_mask
+        loss = make_target_oar_normal_tissue_loss(
+            target_mask, 0.50, oar_mask, 0.30,
+            normal_tissue_mask, 0.50,
+            oar_weight=1.0, normal_tissue_weight=1.0,
+        )
+    output_dir = args.output_dir or os.path.join(
+        REPOSITORY_ROOT, "test_phantom_output", "optimized_gantry_scan",
+        args.objective.replace("-", "_"),
+    )
 
     def make_operator(angle):
         angle_plan = copy(plan)
@@ -95,6 +119,7 @@ def main():
         )
         optimized_dose = operator.dose(solution.weights)
         row = {
+            "objective": args.objective,
             "gantry_angle_deg": float(angle),
             "fixed_weight_loss": float(fixed_loss),
             "optimized_loss": solution.objective,
@@ -103,8 +128,10 @@ def main():
             "iterations": solution.iterations,
             "evaluations": solution.evaluations,
             "target_mean_dose": float(np.mean(optimized_dose[target_mask])),
+            "target_d95_dose": float(np.percentile(optimized_dose[target_mask], 5)),
             "oar_max_dose": float(np.max(optimized_dose[oar_mask])),
             "full_grid_max_dose": float(np.max(optimized_dose)),
+            "body_max_dose": float(np.max(optimized_dose[body_mask])),
         }
         row.update(
             {f"spot_weight_{index}": float(weight)
@@ -116,8 +143,8 @@ def main():
                 f"optimized loss exceeded fixed-weight loss at {angle:.3f} deg"
             )
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir, "gantry_scan.csv")
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "gantry_scan.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -139,7 +166,7 @@ def main():
             label="Solver check not passed", zorder=5,
         )
     axes[0].axvline(nominal_angle, color="0.5", linestyle="--", linewidth=1)
-    axes[0].set_ylabel("Toy target/OAR loss")
+    axes[0].set_ylabel(f"{args.objective} toy loss")
     axes[0].legend()
     axes[0].grid(alpha=0.25)
     for index in range(initial_weights.size):
@@ -148,32 +175,36 @@ def main():
     axes[1].set_ylabel("Optimized spot weight")
     axes[1].legend()
     axes[1].grid(alpha=0.25)
-    grid_max = [row["full_grid_max_dose"] for row in rows]
-    axes[2].plot(angles, grid_max, color="tab:purple")
+    body_max = [row["body_max_dose"] for row in rows]
+    axes[2].plot(angles, body_max, color="tab:purple")
     axes[2].axvline(nominal_angle, color="0.5", linestyle="--", linewidth=1)
     axes[2].set_xlabel("Gantry angle (degrees)")
-    axes[2].set_ylabel("Full-grid maximum dose")
+    axes[2].set_ylabel("Water-phantom maximum dose")
     axes[2].grid(alpha=0.25)
     fig.tight_layout()
-    png_path = os.path.join(args.output_dir, "gantry_scan.png")
+    png_path = os.path.join(output_dir, "gantry_scan.png")
     fig.savefig(png_path, dpi=160)
     plt.close(fig)
 
     converged = sum(row["converged"] for row in rows)
     best = min(rows, key=lambda row: row["optimized_loss"])
+    print(f"Objective: {args.objective}")
     print(f"Nominal angle: {nominal_angle:.3f} deg")
     print(f"Scan: {len(rows)} points, {angles[0]:.3f} to {angles[-1]:.3f} deg")
     print(f"Nominal optimized loss: {nominal_solution.objective:.9g}")
     print(f"Lowest sampled toy loss angle: {best['gantry_angle_deg']:.3f} deg")
     print(f"Lowest sampled toy loss: {best['optimized_loss']:.9g}")
-    print(f"Full-grid max dose at sampled best: "
-          f"{best['full_grid_max_dose']:.6g}")
+    print(f"Target mean/D95 dose at sampled best: "
+          f"{best['target_mean_dose']:.6g}/{best['target_d95_dose']:.6g}")
+    print(f"OAR max dose at sampled best: {best['oar_max_dose']:.6g}")
+    print(f"Water-phantom max dose at sampled best: "
+          f"{best['body_max_dose']:.6g}")
     print(f"Stationarity checks passed: {converged}/{len(rows)}")
     largest_weight = float(np.max(weights))
     print(f"Largest optimized spot weight: {largest_weight:.6g}")
     if largest_weight > 10.0 * float(np.max(nominal_weights)):
-        print("WARNING: toy objective permits extreme spot weights outside its "
-              "target/OAR masks; this scan is not a deliverable BAO plan.")
+        print("WARNING: extreme spot weights in this toy case; this scan is "
+              "not a deliverable BAO plan.")
     print(f"CSV: {csv_path}")
     print(f"Plot: {png_path}")
     if converged != len(rows):

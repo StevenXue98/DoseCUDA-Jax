@@ -78,6 +78,59 @@ def make_target_oar_loss(
     return loss
 
 
+def make_target_oar_normal_tissue_loss(
+    target_mask,
+    prescription,
+    oar_mask,
+    oar_limit,
+    normal_tissue_mask,
+    normal_tissue_limit,
+    *,
+    oar_weight=1.0,
+    normal_tissue_weight=1.0,
+) -> LossAndDoseGradient:
+    """Target deviation plus one-sided OAR and normal-tissue overdose.
+
+    Each structure contributes a mean squared error normalized by the square
+    of the target prescription. The caller chooses structures, limits, and
+    weights; this function does not encode a clinical prescription.
+    """
+    base_loss = make_target_oar_loss(
+        target_mask, prescription, oar_mask, oar_limit, oar_weight
+    )
+    normal_tissue_mask = np.asarray(normal_tissue_mask)
+    target_mask = np.asarray(target_mask)
+    oar_mask = np.asarray(oar_mask)
+    if normal_tissue_mask.shape != target_mask.shape:
+        raise ValueError("normal-tissue mask must match target/OAR shape")
+    if not np.all((normal_tissue_mask == 0) | (normal_tissue_mask == 1)):
+        raise ValueError("normal-tissue mask must contain only zeros and ones")
+    if not np.any(normal_tissue_mask):
+        raise ValueError("normal-tissue mask must not be empty")
+    normal_tissue_mask = normal_tissue_mask.astype(bool, copy=True)
+    if np.any(normal_tissue_mask & (target_mask.astype(bool) | oar_mask.astype(bool))):
+        raise ValueError("normal-tissue mask must exclude target and OAR")
+    if not np.isfinite(normal_tissue_limit) or normal_tissue_limit < 0:
+        raise ValueError("normal-tissue limit must be finite and nonnegative")
+    if not np.isfinite(normal_tissue_weight) or normal_tissue_weight < 0:
+        raise ValueError("normal-tissue weight must be finite and nonnegative")
+
+    count = int(np.count_nonzero(normal_tissue_mask))
+    scale = float(prescription) ** 2
+    limit = float(normal_tissue_limit)
+    weight = float(normal_tissue_weight)
+
+    def loss(dose: np.ndarray) -> tuple[float, np.ndarray]:
+        value, dose_gradient = base_loss(dose)
+        dose = np.asarray(dose, dtype=np.float32)
+        excess = np.maximum(dose[normal_tissue_mask] - limit, 0.0)
+        value += weight * np.sum(excess * excess, dtype=np.float64) / (count * scale)
+        dose_gradient[normal_tissue_mask] += 2.0 * weight * excess / (count * scale)
+        return float(value), dose_gradient
+
+    return loss
+
+
 class FixedGeometryBeamDose:
     """One-beam CUDA dose operator with cached WET and a spot-weight VJP."""
 
