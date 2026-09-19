@@ -412,6 +412,23 @@ IMPTWeightOptimizerResult optimize_impt_weights_cuda(
     for (; iterations < max_iterations; ++iterations) {
         const bool accelerated = std::strcmp(method, "fista") == 0;
         const bool conjugate = std::strcmp(method, "cg") == 0;
+        // FISTA differentiates at its extrapolated point. Check stationarity
+        // at the actual accepted weights instead, every 20 accepted steps.
+        if (accelerated && iterations > 0 && iterations % 20 == 0) {
+            best_value = evaluate(x.get(), true);
+            CUDA_CHECK(cudaMemset(norm.get(), 0, sizeof(int)));
+            projected_norm<<<weight_blocks, 256>>>(
+                x.get(), gradient.get(), norm.get(), n_spots);
+            int checked_bits;
+            CUDA_CHECK(cudaMemcpy(&checked_bits, norm.get(), sizeof(int),
+                                  cudaMemcpyDeviceToHost));
+            float checked_norm;
+            std::memcpy(&checked_norm, &checked_bits, sizeof(float));
+            if (checked_norm <= gradient_tolerance) {
+                converged = true;
+                break;
+            }
+        }
         const float next_t = 0.5f * (1.0f + std::sqrt(1.0f + 4.0f * t * t));
         const float momentum = accelerated ? (t - 1.0f) / next_t : 0.0f;
         extrapolate<<<weight_blocks, 256>>>(
