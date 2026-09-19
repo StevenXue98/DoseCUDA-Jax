@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <vector>
 
 #define PY_SSIZE_T_CLEAN
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
@@ -8,6 +9,7 @@
 
 #include "IMRTClasses.cuh"
 #include "IMPTClasses.cuh"
+#include "IMPTWeightGradients.cuh"
 #include "MemoryClasses.h"
 
 
@@ -225,6 +227,40 @@ static void make_spot_array(PyArrayObject *spots, HostPointer<Spot> &res)
 }
 
 
+/** Create a sorted spot array while retaining the caller's original order. */
+static void make_indexed_spot_array(
+	PyArrayObject *spots,
+	HostPointer<Spot> &res,
+	HostPointer<size_t> &sorted_to_original)
+{
+	struct IndexedSpot {
+		Spot spot;
+		size_t original_index;
+	};
+
+	const size_t count = PyArray_DIM(spots, 0);
+	const float *src = pyarray_as<float>(spots);
+	std::vector<IndexedSpot> indexed(count);
+
+	for (size_t i = 0; i < count; ++i) {
+		indexed[i].spot.x = src[4 * i];
+		indexed[i].spot.y = src[4 * i + 1];
+		indexed[i].spot.mu = src[4 * i + 2];
+		indexed[i].spot.energy_id = static_cast<int>(src[4 * i + 3]);
+		indexed[i].original_index = i;
+	}
+
+	std::sort(indexed.begin(), indexed.end(), [](const IndexedSpot &a, const IndexedSpot &b) {
+		return a.spot.energy_id < b.spot.energy_id;
+	});
+
+	for (size_t i = 0; i < count; ++i) {
+		res[i] = indexed[i].spot;
+		sorted_to_original[i] = indexed[i].original_index;
+	}
+}
+
+
 static void make_mlc_array(PyArrayObject *mlc, HostPointer<MLCPair> &res)
 {
 	const size_t count = PyArray_DIM(mlc, 0);
@@ -371,6 +407,168 @@ static PyObject* proton_spot(PyObject *self, PyObject *args) {
 
 	return NULL;
 
+}
+
+
+/** Compute dL/dMU from an arbitrary voxel adjoint dL/dDose. */
+static PyObject* proton_spot_weight_vjp(PyObject *self, PyObject *args) {
+
+	PyObject *model_instance, *volume_instance, *wet_instance, *beam_instance;
+	PyObject *dose_adjoint_instance;
+	int gpu_id;
+
+	if (!PyArg_ParseTuple(
+		args,
+		"OOOOOi",
+		&model_instance,
+		&volume_instance,
+		&wet_instance,
+		&beam_instance,
+		&dose_adjoint_instance,
+		&gpu_id)) {
+		return NULL;
+	}
+
+	double vsadx, vsady;
+	if (!pyobject_getfloat(model_instance, "VSADX", &vsadx)
+	 || !pyobject_getfloat(model_instance, "VSADY", &vsady)) {
+		return NULL;
+	}
+
+	PyArrayObject *lut_depths_array, *lut_sigmas_array, *lut_idds_array;
+	PyArrayObject *lut_divergence_params_array;
+	if (!pyobject_getarray(model_instance, "divergence_params", 2, &lut_divergence_params_array)
+	 || !pyobject_getarray(model_instance, "lut_depths", 2, &lut_depths_array)
+	 || !pyobject_getarray(model_instance, "lut_sigmas", 2, &lut_sigmas_array)
+	 || !pyobject_getarray(model_instance, "lut_idds", 2, &lut_idds_array)) {
+		return NULL;
+	}
+
+	PyArrayObject *density_array, *spacing_array, *origin_array;
+	if (!pyobject_getarray(volume_instance, "voxel_data", 3, &density_array)
+	 || !pyobject_getarray(volume_instance, "spacing", 1, &spacing_array)
+	 || !pyobject_getarray(volume_instance, "origin", 1, &origin_array)) {
+		return NULL;
+	}
+
+	PyArrayObject *wet_array;
+	if (!pyobject_getarray(wet_instance, "voxel_data", 3, &wet_array)) {
+		return NULL;
+	}
+
+	if (!PyArray_Check(dose_adjoint_instance)) {
+		PyErr_SetString(PyExc_ValueError, "dose_adjoint must be a NumPy array");
+		return NULL;
+	}
+	PyArrayObject *dose_adjoint_array =
+		reinterpret_cast<PyArrayObject *>(dose_adjoint_instance);
+	if (!pyarray_typecheck(dose_adjoint_array, 3, NPY_FLOAT)
+	 || !PyArray_IS_C_CONTIGUOUS(dose_adjoint_array)) {
+		PyErr_SetString(
+			PyExc_ValueError,
+			"dose_adjoint must be a C-contiguous, 3-dimensional float32 array");
+		return NULL;
+	}
+	for (int axis = 0; axis < 3; ++axis) {
+		if (PyArray_DIM(dose_adjoint_array, axis) != PyArray_DIM(wet_array, axis)) {
+			PyErr_SetString(PyExc_ValueError, "dose_adjoint shape must match the WET volume");
+			return NULL;
+		}
+	}
+
+	PyArrayObject *iso_array, *spots_array;
+	if (!pyobject_getarray(beam_instance, "iso", 1, &iso_array)
+	 || !pyobject_getarray(beam_instance, "spot_list", 2, &spots_array)) {
+		return NULL;
+	}
+
+	double ga, ta;
+	if (!pyobject_getfloat(beam_instance, "gantry_angle", &ga)
+	 || !pyobject_getfloat(beam_instance, "couch_angle", &ta)) {
+		return NULL;
+	}
+
+	const size_t n_spots = PyArray_DIM(spots_array, 0);
+	if (n_spots == 0) {
+		PyErr_SetString(PyExc_ValueError, "beam must contain at least one spot");
+		return NULL;
+	}
+
+	float *spacing = pyarray_as<float>(spacing_array);
+	float *origin = pyarray_as<float>(origin_array);
+	float *iso = pyarray_as<float>(iso_array);
+
+	try {
+		const float adjusted_ga = fmodf(ga + 180.0f, 360.0f);
+		const size_t n_energies = PyArray_DIM(lut_depths_array, 0);
+		size_t dims[3] = {
+			static_cast<size_t>(PyArray_DIMS(wet_array)[0]),
+			static_cast<size_t>(PyArray_DIMS(wet_array)[1]),
+			static_cast<size_t>(PyArray_DIMS(wet_array)[2]),
+		};
+		float adjusted_isocenter[3] = {
+			iso[0] - origin[0],
+			iso[1] - origin[1],
+			iso[2] - origin[2],
+		};
+
+		IMPTDose dose_obj = IMPTDose(dims, spacing[0]);
+		dose_obj.DensityArray = pyarray_as<float>(density_array);
+		dose_obj.WETArray = pyarray_as<float>(wet_array);
+
+		auto model = IMPTBeam::Model();
+		model.vsadx = vsadx;
+		model.vsady = vsady;
+		IMPTBeam beam_obj = IMPTBeam(adjusted_isocenter, adjusted_ga, ta, &model);
+
+		HostPointer<Layer> LayerArray(n_energies);
+		HostPointer<Spot> SpotArray(n_spots);
+		HostPointer<size_t> SortedToOriginal(n_spots);
+		make_indexed_spot_array(spots_array, SpotArray, SortedToOriginal);
+
+		beam_obj.n_energies = n_energies;
+		beam_obj.layers = LayerArray.get();
+		beam_obj.spots = SpotArray.get();
+		beam_obj.n_spots = n_spots;
+		beam_obj.divergence_params = pyarray_as<float>(lut_divergence_params_array);
+		beam_obj.dvp_len = 5;
+		beam_obj.lut_depths = pyarray_as<float>(lut_depths_array);
+		beam_obj.lut_sigmas = pyarray_as<float>(lut_sigmas_array);
+		beam_obj.lut_idds = pyarray_as<float>(lut_idds_array);
+		beam_obj.lut_len = LUT_LENGTH;
+		beam_obj.importLayers();
+
+		HostPointer<float> SortedGradient(MemoryTag::Zeroed(), n_spots);
+		HostPointer<float> OriginalGradient(MemoryTag::Zeroed(), n_spots);
+		proton_spot_weight_vjp_cuda(
+			gpu_id,
+			&dose_obj,
+			&beam_obj,
+			pyarray_as<float>(dose_adjoint_array),
+			SortedGradient.get());
+
+		for (size_t sorted_index = 0; sorted_index < n_spots; ++sorted_index) {
+			OriginalGradient[SortedToOriginal[sorted_index]] = SortedGradient[sorted_index];
+		}
+
+		npy_intp gradient_shape[1] = { static_cast<npy_intp>(n_spots) };
+		PyObject *return_gradient = PyArray_SimpleNewFromData(
+			1,
+			gradient_shape,
+			NPY_FLOAT,
+			OriginalGradient.release());
+		PyArray_ENABLEFLAGS(
+			reinterpret_cast<PyArrayObject *>(return_gradient),
+			NPY_ARRAY_OWNDATA);
+		return return_gradient;
+
+	} catch (std::bad_alloc &) {
+		PyErr_SetString(PyExc_MemoryError, "Not enough host memory");
+	} catch (std::runtime_error &e) {
+		PyErr_Format(PyExc_RuntimeError, "CUDA error: %s", e.what());
+	}
+
+	return NULL;
 }
 
 
@@ -569,6 +767,12 @@ static PyMethodDef DoseMethods[] = {
 		proton_spot,
 		METH_VARARGS,
 		"Compute proton spot dose with PB using pre-calc'd WET array."
+	},
+	{
+		"proton_spot_weight_vjp_cuda",
+		proton_spot_weight_vjp,
+		METH_VARARGS,
+		"Apply the fixed-geometry proton spot-dose transpose to a voxel adjoint."
 	},
 	{
 		"photon_dose_cuda",

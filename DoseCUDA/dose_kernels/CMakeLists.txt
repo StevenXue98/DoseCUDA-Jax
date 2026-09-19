@@ -7,6 +7,7 @@ target_sources(${MODULE_NAME}
         dosemodule.cu
         CudaClasses.cu
         IMPTClasses.cu
+        IMPTWeightGradients.cu
         IMRTClasses.cu
         TextureClasses.cu)
 

@@ -1,0 +1,268 @@
+"""Fixed-geometry IMPT spot-weight optimization without an AD framework.
+
+The CUDA extension supplies the loss-agnostic vector-Jacobian product
+``dL/dDose -> dL/dMU``.  Treatment objectives remain ordinary Python callables
+that return a scalar loss and a voxel adjoint, so changing the objective does
+not require changing the dose kernel.
+"""
+
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
+
+from . import dose_kernels
+from .plan import VolumeObject
+
+
+LossAndDoseGradient = Callable[[np.ndarray], tuple[float, np.ndarray]]
+ValueAndWeightGradient = Callable[[np.ndarray], tuple[float, np.ndarray]]
+
+
+class FixedGeometryBeamDose:
+    """One-beam CUDA dose operator with cached WET and a spot-weight VJP."""
+
+    def __init__(self, dose_grid, plan, beam_index=0, gpu_id=0):
+        dose_grid._validate_geometry()
+        if not np.allclose(dose_grid.spacing, dose_grid.spacing[0]):
+            raise ValueError("Spacing must be isotropic for IMPT dose calculation")
+        if beam_index < 0 or beam_index >= len(plan.beam_list):
+            raise IndexError("beam_index is outside plan.beam_list")
+
+        self.dose_grid = dose_grid
+        self.plan = plan
+        self.beam = plan.beam_list[beam_index]
+        self.gpu_id = int(gpu_id)
+        self.dose_scale = float(plan.n_fractions)
+
+        try:
+            model_index = list(plan.dicom_rangeshifter_label.astype(str)).index(
+                self.beam.dicom_rangeshifter_label
+            )
+        except ValueError as error:
+            raise ValueError(
+                "Beam model not found for rangeshifter ID "
+                f"{self.beam.dicom_rangeshifter_label}"
+            ) from error
+        self.beam_model = plan.beam_models[model_index]
+
+        rlsp = np.ascontiguousarray(
+            dose_grid.RLSPFromHU(plan.machine_name), dtype=np.float32
+        )
+        self._rlsp = VolumeObject()
+        self._rlsp.voxel_data = rlsp
+        self._rlsp.origin = np.asarray(dose_grid.origin, dtype=np.float32)
+        self._rlsp.spacing = np.asarray(dose_grid.spacing, dtype=np.float32)
+
+        wet_data = dose_kernels.proton_raytrace_cuda(
+            self.beam_model,
+            self._rlsp,
+            self.beam,
+            self.gpu_id,
+        )
+        self._wet = VolumeObject()
+        self._wet.voxel_data = np.ascontiguousarray(wet_data, dtype=np.float32)
+        self._wet.origin = self._rlsp.origin
+        self._wet.spacing = self._rlsp.spacing
+
+    @property
+    def n_spots(self):
+        return int(self.beam.n_spots)
+
+    @property
+    def weights(self):
+        return np.asarray(self.beam.spot_list[:, 2], dtype=np.float32).copy()
+
+    def _validate_weights(self, weights):
+        weights = np.asarray(weights, dtype=np.float32)
+        if weights.shape != (self.n_spots,):
+            raise ValueError(
+                f"weights must have shape ({self.n_spots},), got {weights.shape}"
+            )
+        if not np.all(np.isfinite(weights)):
+            raise ValueError("weights must be finite")
+        return weights
+
+    def dose(self, weights):
+        """Return fraction-scaled dose for weights in the beam's original order."""
+        weights = self._validate_weights(weights)
+        self.beam.spot_list[:, 2] = weights
+        dose = dose_kernels.proton_spot_cuda(
+            self.beam_model,
+            self._rlsp,
+            self._wet,
+            self.beam,
+            self.gpu_id,
+        )
+        return np.asarray(dose, dtype=np.float32) * self.dose_scale
+
+    def weight_vjp(self, dose_gradient):
+        """Apply ``(dDose/dWeights).T`` to an arbitrary voxel gradient."""
+        dose_gradient = np.ascontiguousarray(dose_gradient, dtype=np.float32)
+        expected_shape = tuple(int(value) for value in self.dose_grid.size)
+        if dose_gradient.shape != expected_shape:
+            raise ValueError(
+                f"dose_gradient must have shape {expected_shape}, "
+                f"got {dose_gradient.shape}"
+            )
+        if not np.all(np.isfinite(dose_gradient)):
+            raise ValueError("dose_gradient must be finite")
+
+        # dose() returns n_fractions times the raw beam dose, so its transpose
+        # product requires the same chain-rule factor.
+        raw_gradient = dose_gradient * np.float32(self.dose_scale)
+        return np.asarray(
+            dose_kernels.proton_spot_weight_vjp_cuda(
+                self.beam_model,
+                self._rlsp,
+                self._wet,
+                self.beam,
+                raw_gradient,
+                self.gpu_id,
+            ),
+            dtype=np.float32,
+        )
+
+    def value_and_gradient(self, weights, loss: LossAndDoseGradient):
+        """Evaluate an arbitrary dose loss and its spot-weight gradient."""
+        dose = self.dose(weights)
+        value, dose_gradient = loss(dose)
+        value = float(value)
+        if not np.isfinite(value):
+            raise ValueError("loss must be finite")
+        return value, self.weight_vjp(dose_gradient)
+
+
+class FixedGeometryPlanDose:
+    """Multi-beam fixed-geometry operator with one concatenated weight vector."""
+
+    def __init__(self, dose_grid, plan, gpu_id=0):
+        if not plan.beam_list:
+            raise ValueError("plan must contain at least one beam")
+        self.beams = tuple(
+            FixedGeometryBeamDose(dose_grid, plan, beam_index, gpu_id)
+            for beam_index in range(len(plan.beam_list))
+        )
+        counts = np.asarray([beam.n_spots for beam in self.beams], dtype=np.int64)
+        self._offsets = np.concatenate((np.asarray([0]), np.cumsum(counts)))
+
+    @property
+    def n_spots(self):
+        return int(self._offsets[-1])
+
+    @property
+    def weights(self):
+        return np.concatenate([beam.weights for beam in self.beams])
+
+    def _split(self, values):
+        values = np.asarray(values, dtype=np.float32)
+        if values.shape != (self.n_spots,):
+            raise ValueError(
+                f"weights must have shape ({self.n_spots},), got {values.shape}"
+            )
+        return tuple(
+            values[self._offsets[index] : self._offsets[index + 1]]
+            for index in range(len(self.beams))
+        )
+
+    def dose(self, weights):
+        beam_weights = self._split(weights)
+        total = None
+        for beam, weights_for_beam in zip(self.beams, beam_weights):
+            beam_dose = beam.dose(weights_for_beam)
+            if total is None:
+                total = beam_dose
+            else:
+                total += beam_dose
+        return total
+
+    def weight_vjp(self, dose_gradient):
+        return np.concatenate(
+            [beam.weight_vjp(dose_gradient) for beam in self.beams]
+        )
+
+    def value_and_gradient(self, weights, loss: LossAndDoseGradient):
+        dose = self.dose(weights)
+        value, dose_gradient = loss(dose)
+        value = float(value)
+        if not np.isfinite(value):
+            raise ValueError("loss must be finite")
+        return value, self.weight_vjp(dose_gradient)
+
+
+@dataclass(frozen=True)
+class ProjectedGradientResult:
+    weights: np.ndarray
+    objective_history: tuple[float, ...]
+    iterations: int
+    converged: bool
+
+
+def projected_gradient_descent(
+    value_and_gradient: ValueAndWeightGradient,
+    initial_weights,
+    *,
+    max_iterations=200,
+    initial_step=1.0,
+    gradient_tolerance=1.0e-6,
+    relative_tolerance=1.0e-8,
+    armijo=1.0e-4,
+    backtracking=0.5,
+    minimum_step=1.0e-10,
+):
+    """Minimize a differentiable objective subject to nonnegative weights."""
+    weights = np.maximum(np.asarray(initial_weights, dtype=np.float32), 0.0)
+    if weights.ndim != 1 or not np.all(np.isfinite(weights)):
+        raise ValueError("initial_weights must be a finite one-dimensional array")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be positive")
+    if initial_step <= 0.0:
+        raise ValueError("initial_step must be positive")
+    if not 0.0 < backtracking < 1.0:
+        raise ValueError("backtracking must lie strictly between zero and one")
+
+    value, gradient = value_and_gradient(weights)
+    gradient = np.asarray(gradient, dtype=np.float32)
+    history = [float(value)]
+    step_hint = float(initial_step)
+    converged = False
+
+    for iteration in range(1, max_iterations + 1):
+        projected_gradient = weights - np.maximum(weights - gradient, 0.0)
+        if float(np.linalg.norm(projected_gradient, ord=np.inf)) <= gradient_tolerance:
+            converged = True
+            break
+
+        step = step_hint
+        accepted = False
+        while step >= minimum_step:
+            candidate = np.maximum(weights - step * gradient, 0.0).astype(np.float32)
+            direction = candidate - weights
+            candidate_value, candidate_gradient = value_and_gradient(candidate)
+            sufficient_decrease = value + armijo * float(np.dot(gradient, direction))
+            if candidate_value <= sufficient_decrease:
+                accepted = True
+                break
+            step *= backtracking
+
+        if not accepted:
+            break
+
+        improvement = value - candidate_value
+        scale = max(1.0, abs(value))
+        weights = candidate
+        value = float(candidate_value)
+        gradient = np.asarray(candidate_gradient, dtype=np.float32)
+        history.append(value)
+        step_hint = min(float(initial_step), step / backtracking)
+
+        if improvement <= relative_tolerance * scale:
+            converged = True
+            break
+
+    return ProjectedGradientResult(
+        weights=weights.copy(),
+        objective_history=tuple(history),
+        iterations=len(history) - 1,
+        converged=converged,
+    )

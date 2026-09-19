@@ -54,6 +54,7 @@ python -m unittest tests/test_indexing_contract.py
 python tests/validate_noncubic_cuda_jax.py
 python tests/validate_cuda_jax_matrix.py
 python tests/validate_spot_weight_gradients.py
+python tests/validate_cuda_spot_weight_vjp.py
 python tests/validate_spot_position_gradients.py
 python tests/validate_frozen_wet_angle_gradients.py
 python tests/diagnose_full_angle_gradients.py
@@ -63,18 +64,21 @@ python tests/validate_cuda_jax_reference.py
 python tests/test_head_and_neck.py
 ```
 
-All eleven are read-only by default. The CUDA/JAX matrix covers both non-cubic axis
+All twelve are read-only by default. The CUDA/JAX matrix covers both non-cubic axis
 orders, a heterogeneous oblique beam, and a two-beam fractionated plan. The
 gradient validations compare JAX autodiff with central finite differences.
-The weight test also checks independent unit-spot dose responses. The position
-test holds WET and beam geometry fixed, so it validates the smooth lateral
-pencil-beam path. The angle test rebuilds beam geometry from traceable gantry
-and couch angles but holds WET fixed. The full-angle diagnostic additionally
-recomputes ray tracing and WET smoothing. It validates the final-dose gradient
-while reporting, but not hiding, the discontinuous derivative introduced by
-rounded voxel selection during WET smoothing. The angle-gradient matrix repeats
-that diagnostic at four beam orientations in homogeneous and heterogeneous
-phantoms, including target and OAR-style dose objectives.
+The JAX weight test also checks independent unit-spot dose responses. The CUDA
+weight test validates the loss-agnostic reverse-mode product against linear and
+quadratic finite differences, then recovers known nonnegative spot weights with
+projected gradient descent. The position test holds WET and beam geometry fixed,
+so it validates the smooth lateral pencil-beam path. The angle test rebuilds
+beam geometry from traceable gantry and couch angles but holds WET fixed. The
+full-angle diagnostic additionally recomputes ray tracing and WET smoothing. It
+validates the final-dose gradient while reporting, but not hiding, the
+discontinuous derivative introduced by rounded voxel selection during WET
+smoothing. The angle-gradient matrix repeats that diagnostic at four beam
+orientations in homogeneous and heterogeneous phantoms, including target and
+OAR-style dose objectives.
 
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:
