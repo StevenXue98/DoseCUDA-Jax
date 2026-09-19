@@ -94,8 +94,12 @@ python tests/profile_cuda_target_oar_optimization.py
 The profile prints cached-WET setup, complete projected-gradient runtime,
 objective-evaluation count, and timings for dose, Python loss, and weight VJP.
 These timings include GPU execution and host transfers but do not separate
-them. The masks and dose limits are toy inputs, not a clinical prescription or
-validated treatment plan.
+them. The same script then assembles a three-column unit-spot dose matrix as
+an independent tiny-problem reference and compares a bounded CPU solve, the
+CUDA projected-gradient result, and a bounded solve using the CUDA callback.
+The matrix is only a validation oracle, not the production dose path. The masks
+and dose limits are toy inputs, not a clinical prescription or validated
+treatment plan.
 
 To map the CUDA-compatible smoother's local BAO loss landscape and compare
 autodiff slopes with dense forward evaluations:

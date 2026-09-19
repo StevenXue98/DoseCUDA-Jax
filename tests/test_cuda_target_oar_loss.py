@@ -4,7 +4,10 @@ import unittest
 
 import numpy as np
 
-from DoseCUDA.impt_weight_optimization import make_target_oar_loss
+from DoseCUDA.impt_weight_optimization import (
+    make_target_oar_loss,
+    projected_gradient_descent,
+)
 
 
 class TargetOARLossTests(unittest.TestCase):
@@ -52,6 +55,21 @@ class TargetOARLossTests(unittest.TestCase):
         mask = np.zeros((2, 2, 2), dtype=bool)
         with self.assertRaisesRegex(ValueError, "target mask must not be empty"):
             make_target_oar_loss(mask, 2.0, np.ones_like(mask), 1.0)
+
+    def test_small_objective_change_does_not_mean_stationarity(self):
+        def objective(weights):
+            residual = float(weights[0]) - 1.0
+            return 0.5 * residual * residual, np.asarray([residual], dtype=np.float32)
+
+        result = projected_gradient_descent(
+            objective,
+            np.asarray([0.0], dtype=np.float32),
+            initial_step=1.0e-7,
+            relative_tolerance=1.0e-6,
+            gradient_tolerance=1.0e-9,
+        )
+        self.assertEqual(result.iterations, 1)
+        self.assertFalse(result.converged)
 
 
 if __name__ == "__main__":

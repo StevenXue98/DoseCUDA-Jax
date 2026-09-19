@@ -269,7 +269,11 @@ def projected_gradient_descent(
     backtracking=0.5,
     minimum_step=1.0e-10,
 ):
-    """Minimize a differentiable objective subject to nonnegative weights."""
+    """Minimize a differentiable objective subject to nonnegative weights.
+
+    ``converged`` means the projected-gradient tolerance was met. A small
+    objective change can stop the search without certifying stationarity.
+    """
     weights = np.maximum(np.asarray(initial_weights, dtype=np.float32), 0.0)
     if weights.ndim != 1 or not np.all(np.isfinite(weights)):
         raise ValueError("initial_weights must be a finite one-dimensional array")
@@ -316,7 +320,11 @@ def projected_gradient_descent(
         step_hint = min(float(initial_step), step / backtracking)
 
         if improvement <= relative_tolerance * scale:
-            converged = True
+            projected_gradient = weights - np.maximum(weights - gradient, 0.0)
+            converged = (
+                float(np.linalg.norm(projected_gradient, ord=np.inf))
+                <= gradient_tolerance
+            )
             break
 
     return ProjectedGradientResult(

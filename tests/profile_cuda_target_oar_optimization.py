@@ -10,6 +10,7 @@ import sys
 from time import perf_counter
 
 import numpy as np
+from scipy.optimize import minimize
 
 
 REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,8 +38,9 @@ def main():
     oar_mask = (z - 10) ** 2 + (y - 25) ** 2 + (x - 13) ** 2 <= 2**2
     prescription = 0.50
     oar_limit = 0.30
+    oar_weight = 0.25
     loss = make_target_oar_loss(
-        target_mask, prescription, oar_mask, oar_limit, oar_weight=0.25
+        target_mask, prescription, oar_mask, oar_limit, oar_weight=oar_weight
     )
     initial_weights = operator.weights
 
@@ -117,6 +119,118 @@ def main():
 
     if result.objective_history[-1] >= result.objective_history[0]:
         raise SystemExit("target/OAR objective did not decrease")
+
+    # Independent tiny-problem reference: assemble unit-spot dose columns,
+    # formulate the same objective directly in float64, and use a bounded
+    # optimizer. This matrix is a test oracle, not the production dose path.
+    basis = np.stack(
+        [
+            operator.dose(np.eye(operator.n_spots, dtype=np.float32)[index])
+            for index in range(operator.n_spots)
+        ],
+        axis=-1,
+    ).astype(np.float64)
+    np.testing.assert_allclose(
+        np.tensordot(basis, initial_weights.astype(np.float64), axes=([-1], [0])),
+        initial_dose,
+        rtol=1.0e-4,
+        atol=1.0e-5,
+    )
+    trial_weights = np.asarray((0.3, 1.2, 0.4), dtype=np.float32)
+    np.testing.assert_allclose(
+        np.tensordot(basis, trial_weights.astype(np.float64), axes=([-1], [0])),
+        operator.dose(trial_weights),
+        rtol=1.0e-4,
+        atol=1.0e-5,
+    )
+    target_columns = basis[target_mask]
+    oar_columns = basis[oar_mask]
+    scale = prescription * prescription
+
+    def reference_value_and_gradient(weights):
+        target_error = target_columns @ weights - prescription
+        oar_excess = np.maximum(oar_columns @ weights - oar_limit, 0.0)
+        value = (
+            np.mean(target_error**2)
+            + oar_weight * np.mean(oar_excess**2)
+        ) / scale
+        gradient = (
+            2.0 * target_columns.T @ target_error / target_columns.shape[0]
+            + 2.0 * oar_weight * oar_columns.T @ oar_excess / oar_columns.shape[0]
+        ) / scale
+        return value, gradient
+
+    reference_initial_value, reference_initial_gradient = (
+        reference_value_and_gradient(initial_weights.astype(np.float64))
+    )
+    np.testing.assert_allclose(
+        reference_initial_value, loss(initial_dose)[0], atol=1.0e-6
+    )
+    np.testing.assert_allclose(
+        reference_initial_gradient, analytic_gradient, rtol=3.0e-3, atol=3.0e-4
+    )
+
+    reference = minimize(
+        reference_value_and_gradient,
+        initial_weights.astype(np.float64),
+        jac=True,
+        bounds=[(0.0, None)] * operator.n_spots,
+        method="L-BFGS-B",
+        options={"ftol": 1.0e-14, "gtol": 1.0e-9, "maxiter": 2000},
+    )
+    if not reference.success:
+        raise SystemExit(f"independent bounded solve failed: {reference.message}")
+    reference_dose = operator.dose(reference.x.astype(np.float32))
+    reference_cuda_value = loss(reference_dose)[0]
+    np.testing.assert_allclose(reference.fun, reference_cuda_value, atol=1.0e-6)
+
+    cuda_lbfgsb = minimize(
+        lambda weights: operator.value_and_gradient(weights, loss),
+        initial_weights.astype(np.float64),
+        jac=True,
+        bounds=[(0.0, None)] * operator.n_spots,
+        method="L-BFGS-B",
+        options={"ftol": 1.0e-12, "gtol": 1.0e-6, "maxiter": 1000},
+    )
+    cuda_lbfgsb_value = loss(operator.dose(cuda_lbfgsb.x.astype(np.float32)))[0]
+
+    refined = projected_gradient_descent(
+        lambda weights: operator.value_and_gradient(weights, loss),
+        result.weights,
+        max_iterations=2000,
+        initial_step=1.0,
+        gradient_tolerance=1.0e-5,
+        relative_tolerance=1.0e-10,
+    )
+    refined_value, refined_gradient = operator.value_and_gradient(
+        refined.weights, loss
+    )
+    projected_gradient = refined.weights - np.maximum(
+        refined.weights - refined_gradient, 0.0
+    )
+    print(f"independent bounded optimum: {reference.fun:.9g}")
+    print(f"50-step objective gap: {result.objective_history[-1] - reference.fun:.6g}")
+    print(f"CUDA bounded solve: {cuda_lbfgsb_value:.9g}; "
+          f"gap: {cuda_lbfgsb_value - reference.fun:.6g}; "
+          f"success: {cuda_lbfgsb.success}")
+    print(f"CUDA bounded weights: {cuda_lbfgsb.x.tolist()}")
+    print(f"refined CUDA objective: {refined_value:.9g}; "
+          f"gap: {refined_value - reference.fun:.6g}")
+    print(f"refined CUDA iterations: {refined.iterations}; "
+          f"converged: {refined.converged}")
+    print(f"refined projected-gradient norm: "
+          f"{np.linalg.norm(projected_gradient, ord=np.inf):.6g}")
+    print(f"reference weights: {reference.x.tolist()}")
+    print(f"refined CUDA weights: {refined.weights.tolist()}")
+    print(f"reference target mean: {np.mean(reference_dose[target_mask]):.6g}")
+    print(f"reference OAR max: {np.max(reference_dose[oar_mask]):.6g}; "
+          f"voxels above limit: "
+          f"{np.count_nonzero(reference_dose[oar_mask] > oar_limit)}")
+
+    if refined_value - reference.fun > 1.0e-4:
+        raise SystemExit("CUDA weight solve remains above independent optimum")
+    if cuda_lbfgsb_value - reference.fun > 1.0e-4:
+        raise SystemExit("CUDA bounded solve remains above independent optimum")
 
 
 if __name__ == "__main__":
