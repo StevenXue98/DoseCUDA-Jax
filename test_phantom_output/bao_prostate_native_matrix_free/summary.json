@@ -1,0 +1,121 @@
+{
+  "purpose": "native-resolution patient-anatomy throughput; not a clinical plan",
+  "case": "matRad PROSTATE",
+  "grid_spacing_mm": 3.0,
+  "angles_deg": [
+    90.0,
+    270.0
+  ],
+  "spot_count": 3410,
+  "matrix": "none; original matrix-free DoseCUDA forward/VJP",
+  "gpu_baseline_used_mib": 16,
+  "gpu_baseline_free_mib": 11148,
+  "caps": {
+    "max_total_seconds": 240.0,
+    "max_solver_seconds": 120.0,
+    "max_used_gpu_mib": 9500,
+    "max_iterations": 20
+  },
+  "status": "complete",
+  "load_seconds": 0.34065227700011746,
+  "grid_shape_zyx": [
+    90,
+    183,
+    183
+  ],
+  "voxel_count": 3014010,
+  "structure_voxels": {
+    "PTV_68": 6782,
+    "Rectum_exclusive": 1651,
+    "BODY_exclusive": 656554
+  },
+  "scored_voxel_count": 683189,
+  "estimated_dense_float64_matrix_gib": 17.357427552342415,
+  "geometry_seconds": 0.3355911409998953,
+  "first_forward_seconds": 0.15468186899943248,
+  "first_loss": 0.008963594550432455,
+  "first_target_d95": 0.8727848619222641,
+  "forward_seconds": [
+    0.14178066000022227,
+    0.14190716199937015,
+    0.1414344560007521
+  ],
+  "forward_vjp_loss_seconds": [
+    0.2183971519998522,
+    0.2178916949997074,
+    0.2189692690008087
+  ],
+  "forward_vjp_loss_median_seconds": 0.2183971519998522,
+  "weight_solve": {
+    "iterations": 20,
+    "evaluations": 21,
+    "seconds": 4.630070916000477,
+    "success": false,
+    "message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT"
+  },
+  "weight_checkpoints": [
+    {
+      "iteration": 0,
+      "solve_elapsed_seconds": 0.0,
+      "exact_loss": 0.00896359455079441,
+      "PTV_68_d95": 0.8727848619222641,
+      "active_spots": 1540
+    },
+    {
+      "iteration": 5,
+      "solve_elapsed_seconds": 1.321224257000722,
+      "exact_loss": 0.006436523202304765,
+      "PTV_68_d95": 0.8819568812847137,
+      "active_spots": 2225
+    },
+    {
+      "iteration": 20,
+      "solve_elapsed_seconds": 4.630068926000604,
+      "exact_loss": 0.0042356098907079705,
+      "PTV_68_d95": 0.9082875490188599,
+      "active_spots": 2245
+    }
+  ],
+  "angle_probes": [
+    {
+      "angles_deg": [
+        92.0,
+        270.0
+      ],
+      "geometry_seconds": 0.2305853230000139,
+      "forward_loss_seconds": 0.18852595899988955,
+      "exact_fixed_weight_loss": 0.004423896863406288
+    },
+    {
+      "angles_deg": [
+        88.0,
+        270.0
+      ],
+      "geometry_seconds": 0.22159578399987367,
+      "forward_loss_seconds": 0.18952068300040992,
+      "exact_fixed_weight_loss": 0.0044794545757405645
+    },
+    {
+      "angles_deg": [
+        90.0,
+        272.0
+      ],
+      "geometry_seconds": 0.22290971300026285,
+      "forward_loss_seconds": 0.18886156900043716,
+      "exact_fixed_weight_loss": 0.004699251831969852
+    },
+    {
+      "angles_deg": [
+        90.0,
+        268.0
+      ],
+      "geometry_seconds": 0.22244232799948804,
+      "forward_loss_seconds": 0.17710825700032728,
+      "exact_fixed_weight_loss": 0.004355512429784779
+    }
+  ],
+  "elapsed_seconds": 8.839251286000035,
+  "gpu_peak_sampled_mib": 199,
+  "gpu_sampler_error": null,
+  "host_peak_rss_mib": 758.58984375
+}
