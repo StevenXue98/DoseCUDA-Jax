@@ -610,39 +610,32 @@ step experiments.
 
 ## Alternating two-beam toy BAO
 
-Run `python tests/run_toy_two_beam_alternating.py` from the activated project
-environment. This uses the same full-voxel, 90-spot toy objective and the
-previously computed accurate 2° pair grid. At fixed angles, matrix-free CUDA
-forward/VJP calls take bounded L-BFGS-B spot-weight steps. A Gaussian angle
-direction proposes moves, but an angle is accepted only if a fresh unsmoothed
-DoseCUDA evaluation lowers the loss **with those same weights**. The adaptive
-schedule tries 20 weight steps first, then continues to 50 and 100 at the
-same angles if no proposed move passes that exact-loss check. Fixed 20- and
-100-step schedules provide context from the same three starts. Only after a
-run ends is its weight vector fully reoptimized with the small-case influence
-matrix, for comparison to the existing grid; that matrix is not used inside
-the alternating loop. Results and path/cost plots are written to ignored
-`test_phantom_output/bao_toy_two_beam_alternating/`. This is an exploratory
-nonconvex toy search, not a globally optimal or clinically validated plan.
+`python tests/run_toy_two_beam_alternating.py` is the original joint
+coordinate-descent diagnostic on the full-voxel, 90-spot toy case. It changes
+angles while holding old weights fixed for acceptance, then adjusts weights
+at the new angle. This is **not** a fair partial-inner approximation to nested
+BAO, because an otherwise good nominal angle may require different weights.
+Its ignored outputs remain under `test_phantom_output/bao_toy_two_beam_alternating/`
+for that diagnostic purpose.
 
-For a matched-start comparison, run
+For the corrected matched-start nominal BAO comparison, run
 `python tests/compare_toy_two_beam_inner_schedules.py`. Each of the three
 preselected angle pairs starts four paths: fixed 20, 50, or 100 matrix-free
-weight steps per angle cycle, plus a reference method that fully solves spot
+weight steps per candidate angle, plus a reference method that fully solves spot
 weights at every proposed angle before deciding whether to move. Methods at
 the same start and outer cycle share Gaussian probe vectors and line-search
-settings. The partial methods still accept only fixed-weight DoseCUDA loss
-decreases; the full-inner method accepts decreases after reoptimizing all
-weights, checked by a fresh original DoseCUDA forward pass. Every visited
-angle also gets a retrospective full inner solve so
-the paths can be plotted on one common objective scale. These retrospective
-solves do not influence partial-method decisions and their time is reported
-separately. Outputs are under ignored `test_phantom_output/bao_toy_two_beam_alternating/matched_schedules/`.
-The full-inner path additionally records each trial angle's loss with its
-current weights before reoptimization; that distinguishes a poor angular
-direction from a candidate whose weights simply need to adapt. Float32 CUDA
-and a stochastic direction estimate make individual trajectories exploratory,
-so one seed is not a performance ranking.
+settings. **Every proposed angle gets its own weight solve before acceptance**:
+20/50/100 steps in the partial paths or a full inner solve in the reference.
+If all partial trial angles fail, the incumbent angle and its saved weights
+are restored, the incumbent weight solve is extended toward 50/100/200 steps,
+and the angle search is retried. Accepted candidates carry their optimized
+weights forward without an immediate redundant inner solve. Every scored
+loss is checked by the original DoseCUDA forward model. Retrospective full
+solves score every visited angle on one common scale; they do not influence
+partial-method decisions, and their time is reported separately. Outputs
+are ignored under `test_phantom_output/bao_toy_two_beam_alternating/candidate_refit_schedules/`.
+This remains a stochastic nonconvex toy search, not a clinical plan or a
+one-seed performance ranking.
 
 # JAX Implementation
 

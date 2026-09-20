@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Matched-start 20/50/100-step alternating BAO versus full inner solves.
+"""Matched-start candidate-refit BAO versus full inner solves.
 
 All four methods use the same toy case, starts, Gaussian probe vectors at each
 outer cycle, angle bounds, line-search steps, and original DoseCUDA forward
-model. Partial methods accept angles at fixed carried weights. The full-inner
-method reoptimizes weights for every candidate angle before acceptance.
+model. Every trial angle gets a weight solve *before* its acceptance check:
+20/50/100 matrix-free L-BFGS-B steps, or a full inner solve. Rejected trial
+weights are discarded; the incumbent weights can be improved and retried.
 Retrospective full solves score every visited angle on one common scale.
 """
 
@@ -30,6 +31,7 @@ from run_toy_two_beam_alternating import (  # noqa: E402
 
 METHODS = {"20 steps": 20, "50 steps": 50, "100 steps": 100,
            "full inner solve": None}
+CURRENT_CHECKPOINTS = (20, 50, 100, 200)
 COLORS = {"20 steps": "#f59e0b", "50 steps": "#06b6d4",
           "100 steps": "#8b5cf6", "full inner solve": "#ef4444"}
 
@@ -43,7 +45,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=20260919)
     parser.add_argument("--starts", type=int, default=len(STARTS))
     parser.add_argument("--output-dir", type=Path,
-                        default=OUTPUT / "matched_schedules")
+                        default=OUTPUT / "candidate_refit_schedules")
     args = parser.parse_args()
     if (args.max_moves < 1 or args.sigma <= 0 or args.gaussian_pairs < 1 or
             args.initial_step <= 0 or not 1 <= args.starts <= len(STARTS)):
@@ -84,6 +86,34 @@ class FullInnerReference:
         return self.cache[key]
 
 
+def try_refitted_angle_move(experiment, angles, incumbent_weights,
+                            current_loss, direction, initial_step, iterations,
+                            *, weight_solver=weight_block):
+    """Line search with a separate partial weight solve at every trial angle."""
+    trials = []
+    if direction is None:
+        return None, trials
+    for divisor in (1, 2, 4, 8, 16, 32):
+        proposal = np.clip(angles + (initial_step / divisor) * direction,
+                           -90.0, 90.0)
+        if np.array_equal(proposal, angles):
+            continue
+        # Keep a recoverable incumbent even if an optimizer mutates its input.
+        trial_weights, block = weight_solver(
+            experiment, proposal, incumbent_weights.copy(), iterations)
+        exact_loss = float(experiment.loss(proposal, trial_weights))
+        trials.append({"angles_deg": proposal.tolist(), "loss": exact_loss,
+                       "weight_block": block})
+        if exact_loss < current_loss - MIN_DECREASE:
+            return (proposal, trial_weights, exact_loss), trials
+    return None, trials
+
+
+def next_current_checkpoint(spent):
+    return next((budget for budget in CURRENT_CHECKPOINTS if budget > spent),
+                None)
+
+
 def run_matched(experiment, start, method, steps, args, start_index):
     started = perf_counter()
     fwd_before, vjp_before = experiment.forward_calls, experiment.vjp_calls
@@ -93,48 +123,68 @@ def run_matched(experiment, start, method, steps, args, start_index):
         solved = reference.solve(angles)
         weights = solved["weights"].copy()
         current_loss = float(solved["loss"])
+        initial_block = None
+        source_budget = None
     else:
         weights = experiment.operator(angles).weights.copy()
+        weights, initial_block = weight_block(experiment, angles, weights, steps)
         current_loss = experiment.loss(angles, weights)
+        source_budget = steps
     path = [{"angles_deg": angles.tolist(), "joint_loss": current_loss,
              "search_seconds": perf_counter() - started,
              "forward_calls": experiment.forward_calls - fwd_before}]
     cycles = []
     for cycle in range(args.max_moves):
-        block = None
-        if steps is not None:
-            candidate, block = weight_block(experiment, angles, weights, steps)
-            checked = experiment.loss(angles, candidate)
-            block["accepted"] = checked <= current_loss + 1.0e-8
-            if block["accepted"]:
-                weights, current_loss = candidate, checked
         probes = shared_probes(args.seed, start_index, cycle, args.gaussian_pairs)
-        gradient, direction = gaussian_direction(
-            experiment, angles, weights, sigma=args.sigma,
-            pairs=args.gaussian_pairs, probes=probes)
-        fixed_trial_losses = []
-        if steps is None:
-            def candidate_loss(proposal, _):
-                fixed_trial_losses.append(experiment.loss(proposal, weights))
-                return reference.solve(proposal, weights)["loss"]
-        else:
-            candidate_loss = experiment.loss
-        moved, trials = try_angle_move(
-            candidate_loss, angles, weights, current_loss, direction,
-            args.initial_step)
-        if steps is None:
-            for trial, fixed_loss in zip(trials, fixed_trial_losses):
-                trial["loss_with_current_weights"] = fixed_loss
-        cycles.append({"cycle": cycle + 1, "weight_block": block,
-                       "gradient": gradient.tolist(),
-                       "loss_before_angle": current_loss, "trials": trials,
+        attempts = []
+        while True:
+            gradient, direction = gaussian_direction(
+                experiment, angles, weights, sigma=args.sigma,
+                pairs=args.gaussian_pairs, probes=probes)
+            fixed_trial_losses = []
+            if steps is None:
+                def candidate_loss(proposal, _):
+                    fixed_trial_losses.append(experiment.loss(proposal, weights))
+                    return reference.solve(proposal, weights)["loss"]
+
+                moved, trials = try_angle_move(
+                    candidate_loss, angles, weights, current_loss, direction,
+                    args.initial_step)
+                for trial, fixed_loss in zip(trials, fixed_trial_losses):
+                    trial["loss_with_current_weights"] = fixed_loss
+            else:
+                moved, trials = try_refitted_angle_move(
+                    experiment, angles, weights, current_loss, direction,
+                    args.initial_step, steps)
+            attempts.append({"current_weight_budget": source_budget,
+                             "gradient": gradient.tolist(),
+                             "loss_before_angle": current_loss,
+                             "trials": trials,
+                             "angle_accepted": moved is not None})
+            if moved is not None or steps is None:
+                break
+            next_budget = next_current_checkpoint(source_budget)
+            if next_budget is None:
+                break
+            improved, block = weight_block(experiment, angles, weights,
+                                           next_budget - source_budget)
+            checked = experiment.loss(angles, improved)
+            block["accepted"] = checked <= current_loss + 1.0e-8
+            attempts[-1]["incumbent_refit"] = block
+            if block["accepted"]:
+                weights, current_loss = improved, checked
+            source_budget = next_budget
+        cycles.append({"cycle": cycle + 1, "attempts": attempts,
                        "angle_accepted": moved is not None})
         if moved is None:
             break
-        angles, current_loss = moved
         if steps is None:
+            angles, current_loss = moved
             solved = reference.solve(angles)
             weights = solved["weights"].copy()
+        else:
+            angles, weights, current_loss = moved
+            source_budget = steps
         path.append({"angles_deg": angles.tolist(), "joint_loss": current_loss,
                      "search_seconds": perf_counter() - started,
                      "forward_calls": experiment.forward_calls - fwd_before})
@@ -150,7 +200,8 @@ def run_matched(experiment, start, method, steps, args, start_index):
         point["fully_reoptimized_loss"] = float(row["loss"])
     final_reference = reference.solve(angles)
     return {"start_angles_deg": list(start), "method": method,
-            "weight_steps_per_cycle": steps, "path": path,
+            "weight_steps_per_candidate": steps,
+            "initial_weight_block": initial_block, "path": path,
             "cycles": cycles, "final_angles_deg": angles.tolist(),
             "final_joint_loss": final_joint_loss,
             "final_fully_reoptimized": without_weights(final_reference),
@@ -266,12 +317,13 @@ def main():
                   f"search {run['search_seconds']:.2f}s", flush=True)
             with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
                 json.dump({"case": "matched-start full-voxel 90-spot toy BAO",
-                           "comparison": "same starts and cycle-indexed Gaussian probes",
+                           "comparison": "candidate-side weight refit before every angle acceptance",
                            "config": {"max_moves": args.max_moves,
                                       "sigma_deg": args.sigma,
                                       "gaussian_pairs": args.gaussian_pairs,
                                       "initial_step_deg": args.initial_step,
                                       "seed": args.seed,
+                                      "current_weight_checkpoints": CURRENT_CHECKPOINTS,
                                       "min_exact_decrease": MIN_DECREASE},
                            "grid_best": grid["grid_best"],
                            "grid_is_sampled_not_global": True,

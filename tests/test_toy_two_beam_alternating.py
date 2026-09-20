@@ -8,7 +8,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_toy_two_beam_alternating import try_angle_move  # noqa: E402
-from compare_toy_two_beam_inner_schedules import shared_probes  # noqa: E402
+from compare_toy_two_beam_inner_schedules import (  # noqa: E402
+    next_current_checkpoint, shared_probes, try_refitted_angle_move,
+)
 
 
 class AngleAcceptanceTests(unittest.TestCase):
@@ -58,6 +60,54 @@ class AngleAcceptanceTests(unittest.TestCase):
         np.testing.assert_array_equal(first, shared_probes(17, 1, 2, 8))
         self.assertFalse(np.array_equal(first, shared_probes(17, 1, 3, 8)))
         self.assertFalse(np.array_equal(first, shared_probes(17, 2, 2, 8)))
+
+    def test_rejected_candidate_refit_cannot_change_incumbent_weights(self):
+        class FakeExperiment:
+            @staticmethod
+            def loss(angles, weights):
+                return float(weights[0])
+
+        incumbent = np.asarray([0.5])
+
+        def bad_candidate(experiment, angles, weights, iterations):
+            weights[0] = 2.0  # Deliberately mutate the supplied array.
+            return weights, {"iterations": iterations}
+
+        moved, trials = try_refitted_angle_move(
+            FakeExperiment(), np.asarray([0.0, 0.0]), incumbent, 0.5,
+            np.asarray([1.0, 0.0]), 8.0, 20,
+            weight_solver=bad_candidate)
+        self.assertIsNone(moved)
+        self.assertEqual(len(trials), 6)
+        np.testing.assert_array_equal(incumbent, [0.5])
+
+    def test_accepted_candidate_retains_its_refitted_weights(self):
+        class FakeExperiment:
+            @staticmethod
+            def loss(angles, weights):
+                return float(weights[0])
+
+        incumbent = np.asarray([0.5])
+
+        def good_candidate(experiment, angles, weights, iterations):
+            weights[0] = 0.2
+            return weights, {"iterations": iterations}
+
+        moved, trials = try_refitted_angle_move(
+            FakeExperiment(), np.asarray([0.0, 0.0]), incumbent, 0.5,
+            np.asarray([1.0, 0.0]), 8.0, 20,
+            weight_solver=good_candidate)
+        self.assertIsNotNone(moved)
+        np.testing.assert_array_equal(moved[1], [0.2])
+        self.assertEqual(moved[2], 0.2)
+        self.assertEqual(len(trials), 1)
+        np.testing.assert_array_equal(incumbent, [0.5])
+
+    def test_rejected_move_can_extend_incumbent_budget(self):
+        self.assertEqual(next_current_checkpoint(20), 50)
+        self.assertEqual(next_current_checkpoint(50), 100)
+        self.assertEqual(next_current_checkpoint(100), 200)
+        self.assertIsNone(next_current_checkpoint(200))
 
 
 if __name__ == "__main__":
