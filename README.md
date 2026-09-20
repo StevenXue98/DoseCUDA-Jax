@@ -620,20 +620,25 @@ for that diagnostic purpose.
 
 For the corrected matched-start nominal BAO comparison, run
 `python tests/compare_toy_two_beam_inner_schedules.py`. Each of the three
-preselected angle pairs starts four paths: fixed 20, 50, or 100 matrix-free
+preselected angle pairs starts six paths: fixed 5, 10, 20, 50, or 100 matrix-free
 weight steps per candidate angle, plus a reference method that fully solves spot
 weights at every proposed angle before deciding whether to move. Methods at
 the same start and outer cycle share Gaussian probe vectors and line-search
 settings. **Every proposed angle gets its own weight solve before acceptance**:
-20/50/100 steps in the partial paths or a full inner solve in the reference.
+5/10/20/50/100 steps in the partial paths or a full inner solve in the reference.
 If all partial trial angles fail, the incumbent angle and its saved weights
-are restored, the incumbent weight solve is extended toward 50/100/200 steps,
+are restored, the incumbent weight solve is extended through the next of
+10/20/50/100/200 steps,
 and the angle search is retried. Accepted candidates carry their optimized
 weights forward without an immediate redundant inner solve. Every scored
 loss is checked by the original DoseCUDA forward model. Retrospective full
 solves score every visited angle on one common scale; they do not influence
 partial-method decisions, and their time is reported separately. Outputs
 are ignored under `test_phantom_output/bao_toy_two_beam_alternating/candidate_refit_schedules/`.
+Path plots mark the shared start with a square and each method's endpoint
+with an X; the loss-path plot already uses fully reoptimized weights at every
+visited angle. A separate quality-versus-search-time plot excludes the
+retrospective reference-solve cost.
 This remains a stochastic nonconvex toy search, not a clinical plan or a
 one-seed performance ranking.
 

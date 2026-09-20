@@ -4,7 +4,7 @@
 All four methods use the same toy case, starts, Gaussian probe vectors at each
 outer cycle, angle bounds, line-search steps, and original DoseCUDA forward
 model. Every trial angle gets a weight solve *before* its acceptance check:
-20/50/100 matrix-free L-BFGS-B steps, or a full inner solve. Rejected trial
+5/10/20/50/100 matrix-free L-BFGS-B steps, or a full inner solve. Rejected trial
 weights are discarded; the incumbent weights can be improved and retried.
 Retrospective full solves score every visited angle on one common scale.
 """
@@ -29,10 +29,12 @@ from run_toy_two_beam_alternating import (  # noqa: E402
 )
 
 
-METHODS = {"20 steps": 20, "50 steps": 50, "100 steps": 100,
+METHODS = {"5 steps": 5, "10 steps": 10, "20 steps": 20,
+           "50 steps": 50, "100 steps": 100,
            "full inner solve": None}
-CURRENT_CHECKPOINTS = (20, 50, 100, 200)
-COLORS = {"20 steps": "#f59e0b", "50 steps": "#06b6d4",
+CURRENT_CHECKPOINTS = (10, 20, 50, 100, 200)
+COLORS = {"5 steps": "#d946ef", "10 steps": "#22c55e",
+          "20 steps": "#f59e0b", "50 steps": "#06b6d4",
           "100 steps": "#8b5cf6", "full inner solve": "#ef4444"}
 
 
@@ -232,6 +234,8 @@ def plot_results(output, surface, runs, grid_best):
                     label=run["method"])
             ax.scatter(*points[-1], marker="x", s=50,
                        color=COLORS[run["method"]])
+        ax.scatter(*np.sort(start), marker="s", s=60, facecolor="white",
+                   edgecolor="black", linewidth=1.0, label="start")
         ax.scatter(*grid_best["angles_deg"], marker="*", s=80, color="white",
                    edgecolor="black", linewidth=0.5, label="2° grid best")
         ax.set_title(f"Same start {start}")
@@ -262,6 +266,8 @@ def plot_results(output, surface, runs, grid_best):
                     label=run["method"])
             ax.scatter(*points[-1], marker="x", s=65,
                        color=COLORS[run["method"]])
+        ax.scatter(*np.sort(start), marker="s", s=65, facecolor="white",
+                   edgecolor="black", linewidth=1.0, label="start")
         all_points = np.asarray(all_points)
         ax.set_xlim(max(-90, np.min(all_points[:, 0]) - 5),
                     min(90, np.max(all_points[:, 0]) + 5))
@@ -294,6 +300,30 @@ def plot_results(output, surface, runs, grid_best):
     axes[0].set_ylabel("Fully reoptimized loss at visited angles")
     axes[-1].legend(fontsize=8)
     fig.savefig(output / "matched_reoptimized_loss_paths.png", dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, len(STARTS), figsize=(15, 4), sharey=True,
+                             constrained_layout=True)
+    for ax, start in zip(axes, STARTS):
+        for run in runs:
+            if tuple(run["start_angles_deg"]) != start:
+                continue
+            ax.scatter(run["search_seconds"],
+                       run["final_fully_reoptimized"]["loss"], s=55,
+                       color=COLORS[run["method"]], label=run["method"])
+            ax.annotate(run["method"].split()[0],
+                        (run["search_seconds"],
+                         run["final_fully_reoptimized"]["loss"]),
+                        xytext=(3, 3), textcoords="offset points", fontsize=7)
+        ax.axhline(grid_best["loss"], color="black", linestyle="--",
+                   linewidth=1, label="2° grid best")
+        ax.set_title(f"Same start {start}")
+        ax.set_xlabel("Search wall time (s; excludes retrospective solves)")
+        ax.set_yscale("log")
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("Final angle quality: fully reoptimized loss")
+    axes[-1].legend(fontsize=8)
+    fig.savefig(output / "quality_vs_search_time.png", dpi=180)
     plt.close(fig)
 
 

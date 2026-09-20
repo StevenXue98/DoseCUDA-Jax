@@ -104,6 +104,8 @@ class AngleAcceptanceTests(unittest.TestCase):
         np.testing.assert_array_equal(incumbent, [0.5])
 
     def test_rejected_move_can_extend_incumbent_budget(self):
+        self.assertEqual(next_current_checkpoint(5), 10)
+        self.assertEqual(next_current_checkpoint(10), 20)
         self.assertEqual(next_current_checkpoint(20), 50)
         self.assertEqual(next_current_checkpoint(50), 100)
         self.assertEqual(next_current_checkpoint(100), 200)
