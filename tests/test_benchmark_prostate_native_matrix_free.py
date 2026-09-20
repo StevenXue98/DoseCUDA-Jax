@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 
 from tests.benchmark_prostate_native_matrix_free import partial_solve
+from tests.solve_prostate_native_matrix_free import projected_gradient_norm
 
 
 class _Sampler:
@@ -13,6 +14,10 @@ class _Sampler:
 
 
 class PartialSolveTests(unittest.TestCase):
+    def test_projected_gradient_respects_nonnegative_boundary(self):
+        self.assertAlmostEqual(
+            projected_gradient_norm([0.0, 1.0], [2.0, -0.5]), 0.5)
+
     def test_keeps_initial_and_actual_final_iteration(self):
         class Quadratic:
             @staticmethod

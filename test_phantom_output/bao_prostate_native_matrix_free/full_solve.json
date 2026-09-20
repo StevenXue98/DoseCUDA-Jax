@@ -1,0 +1,134 @@
+{
+  "purpose": "one capped fixed-angle inner convergence trace; not BAO or clinical validation",
+  "case": "matRad PROSTATE native 3 mm",
+  "angles_deg": [
+    90.0,
+    270.0
+  ],
+  "spot_count": 3410,
+  "matrix": "none; matrix-free DoseCUDA",
+  "caps": {
+    "max_seconds": 600.0,
+    "max_iterations": 3000,
+    "stationarity_tolerance": 0.0001,
+    "max_used_gpu_mib": 9500
+  },
+  "gpu_baseline_used_mib": 16,
+  "gpu_baseline_free_mib": 11148,
+  "checkpoints": [
+    {
+      "iteration": 0,
+      "reason": "initial",
+      "elapsed_seconds": 0.9533655320001344,
+      "loss": 0.008963594550814932,
+      "projected_gradient_norm": 0.002965320833027363,
+      "active_spots": 1540,
+      "evaluations": 1
+    },
+    {
+      "iteration": 5,
+      "reason": "checkpoint",
+      "elapsed_seconds": 2.5266592190000665,
+      "loss": 0.0064365250756270136,
+      "projected_gradient_norm": 0.0019117023330181837,
+      "active_spots": 2225,
+      "evaluations": 8
+    },
+    {
+      "iteration": 20,
+      "reason": "checkpoint",
+      "elapsed_seconds": 6.123994553000557,
+      "loss": 0.0042356379619151825,
+      "projected_gradient_norm": 0.0005005507846362889,
+      "active_spots": 2245,
+      "evaluations": 24
+    },
+    {
+      "iteration": 50,
+      "reason": "checkpoint",
+      "elapsed_seconds": 13.097691142000258,
+      "loss": 0.0034928675301409734,
+      "projected_gradient_norm": 0.00024254001618828624,
+      "active_spots": 2006,
+      "evaluations": 55
+    },
+    {
+      "iteration": 100,
+      "reason": "checkpoint",
+      "elapsed_seconds": 24.883916318000047,
+      "loss": 0.0032745169605705674,
+      "projected_gradient_norm": 6.510515959234908e-05,
+      "active_spots": 1820,
+      "evaluations": 107
+    },
+    {
+      "iteration": 200,
+      "reason": "checkpoint",
+      "elapsed_seconds": 47.96163122800044,
+      "loss": 0.0032169306066559505,
+      "projected_gradient_norm": 2.1363095584092662e-05,
+      "active_spots": 1686,
+      "evaluations": 209
+    },
+    {
+      "iteration": 400,
+      "reason": "checkpoint",
+      "elapsed_seconds": 95.63604714900066,
+      "loss": 0.0032061379377156226,
+      "projected_gradient_norm": 6.25530947218067e-06,
+      "active_spots": 1634,
+      "evaluations": 417
+    },
+    {
+      "iteration": 600,
+      "reason": "checkpoint",
+      "elapsed_seconds": 143.16110625400052,
+      "loss": 0.003205103747619546,
+      "projected_gradient_norm": 1.8466906794856186e-06,
+      "active_spots": 1613,
+      "evaluations": 625
+    },
+    {
+      "iteration": 800,
+      "reason": "checkpoint",
+      "elapsed_seconds": 190.93367563100037,
+      "loss": 0.0032049382436431795,
+      "projected_gradient_norm": 1.127534119405027e-06,
+      "active_spots": 1607,
+      "evaluations": 833
+    },
+    {
+      "iteration": 825,
+      "reason": "solver_stop",
+      "elapsed_seconds": 201.0045712730007,
+      "loss": 0.003204931580115519,
+      "projected_gradient_norm": 7.840729381314304e-07,
+      "active_spots": 1608,
+      "evaluations": 877
+    }
+  ],
+  "solver_runs": [
+    {
+      "restart": 0,
+      "iterations": 825,
+      "evaluations": 867,
+      "success": true,
+      "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+    }
+  ],
+  "status": "stationarity_met",
+  "grid_shape_zyx": [
+    90,
+    183,
+    183
+  ],
+  "geometry_seconds": 0.3367283770003269,
+  "final_iterations": 825,
+  "final_evaluations": 877,
+  "final_loss": 0.003204931580115519,
+  "final_projected_gradient_norm": 7.840729381314304e-07,
+  "final_PTV_68_d95": 0.9203135371208191,
+  "elapsed_seconds": 201.1582044730003,
+  "gpu_peak_sampled_mib": 199,
+  "gpu_sampler_error": null
+}
